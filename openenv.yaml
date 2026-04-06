@@ -1,0 +1,118 @@
+name: sre-fleet-gym
+version: "1.0.0"
+description: >
+  A reinforcement-learning environment simulating SRE incident management.
+  An AI agent must diagnose and fix broken machine fleets of increasing complexity.
+tags:
+  - openenv
+  - sre
+  - infrastructure
+  - incident-management
+
+tasks:
+  - name: single_machine
+    description: "1 machine, 1 zombie process. Kill the correct PID."
+    difficulty: easy
+    max_steps: 30
+    score_range: [0.0, 1.0]
+
+  - name: multi_machine
+    description: "5 machines with mixed CPU spikes and memory pressure. Restore fleet health."
+    difficulty: medium
+    max_steps: 30
+    score_range: [0.0, 1.0]
+
+  - name: cascade_failure
+    description: "20 machines with dependency chains. Fix in dependency order."
+    difficulty: hard
+    max_steps: 30
+    score_range: [0.0, 1.0]
+
+observation_space:
+  type: object
+  properties:
+    fleet:
+      type: array
+      description: "List of machines with their current health state"
+      items:
+        type: object
+        properties:
+          id:           { type: string }
+          hostname:     { type: string }
+          status:       { type: string, enum: [healthy, degraded, critical] }
+          mem_used:     { type: number, description: "Memory used %" }
+          disk_pct:     { type: number, description: "Disk usage %" }
+          syslog_tail:  { type: string, description: "Last line of the system log" }
+          dependencies: { type: array, items: { type: string } }
+          processes:
+            type: array
+            items:
+              type: object
+              properties:
+                pid:        { type: integer }
+                name:       { type: string }
+                cpu_pct:    { type: number }
+                mem_pct:    { type: number }
+                state:      { type: string, enum: [running, zombie, dead] }
+                is_anomaly: { type: boolean }
+    dependencies:
+      type: object
+      description: "Map of machine_id to list of dependency machine_ids"
+    step_count: { type: integer }
+    done:       { type: boolean }
+    reward:     { type: number, minimum: 0.0, maximum: 1.0 }
+    info:
+      type: object
+      additionalProperties: true
+      description: "Extra episode metrics (healthy_count, total_count, success)"
+
+action_space:
+  type: object
+  required: [machine_id, command]
+  properties:
+    machine_id:
+      type: string
+      description: "Target machine ID (e.g. m-001, db-01, cache-02)"
+    command:
+      type: string
+      enum: [kill_pid, restart_service, reboot, noop]
+    target:
+      type: string
+      nullable: true
+      description: "PID for kill_pid, service name for restart_service"
+
+reward:
+  description: >
+    Shaped reward based on fleet health ratio minus step penalty.
+    Partial credit given at every step, not just episode end.
+  min: 0.0
+  max: 1.0
+  signals:
+    - healthy_ratio: "% of machines in healthy status"
+    - step_penalty: "-0.01 per step to encourage efficiency"
+    - order_bonus: "cascade task rewards fixing dependencies first"
+    - wrong_kill_penalty: "-0.05 per non-anomaly process killed"
+
+endpoints:
+  reset:    { method: POST, path: /reset,    description: "Spawn fresh broken fleet" }
+  step:     { method: POST, path: /step,     description: "Execute one action" }
+  state:    { method: GET,  path: /state,    description: "Current fleet snapshot" }
+  tasks:    { method: GET,  path: /tasks,    description: "List tasks + action schema" }
+  grader:   { method: POST, path: /grader,   description: "Score completed episode" }
+  baseline: { method: POST, path: /baseline, description: "Run baseline inference" }
+
+baseline:
+  script: inference.py
+  model: llama3-70b-8192
+  api_client: openai
+  fallback: heuristic
+  scores:
+    single_machine:  1.0
+    multi_machine:   1.0
+    cascade_failure: 0.74
+    total: 2.74
+    max:   3.0
+
+docker:
+  port: 7860
+  healthcheck: GET /health
