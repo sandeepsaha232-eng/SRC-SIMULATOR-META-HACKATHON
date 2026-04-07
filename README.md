@@ -7,9 +7,8 @@ sdk: docker
 app_file: app.py
 pinned: false
 ---
-
 <p align="center">
-  <img src="./assets/hero.png" alt="SRE Fleet Gym Cyberpunk Dashboard" width="100%">
+  <img src="https://raw.githubusercontent.com/sandeepsaha232-eng/SRC-SIMULATOR-META-HACKATHON/main/assets/hero.png" alt="SRE Fleet Gym Cyberpunk Dashboard" width="100%">
 </p>
 
 # 🚀 SRE Fleet Gym: A flight simulator for autonomous incident response agents
