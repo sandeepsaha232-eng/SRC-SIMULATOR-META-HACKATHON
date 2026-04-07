@@ -211,7 +211,7 @@ const MachineGrid = ({ machines, onMachineClick }: { machines: Machine[]; onMach
 };
 
 const MissionControl = ({ setAgentLog, setSysState }: { 
-  setAgentLog: (log: any[]) => void;
+  setAgentLog: React.Dispatch<React.SetStateAction<any[]>>;
   setSysState: React.Dispatch<React.SetStateAction<any>>;
 }) => {
   const [loading, setLoading] = useState(false);
@@ -251,10 +251,15 @@ const MissionControl = ({ setAgentLog, setSysState }: {
       });
       clearTimeout(timeoutId);
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-      const data = await res.json();
+      const data = await res.json(); // 🚀 1. Parse the JSON response
+
       if (data && data.results) {
         const flattenedHistory = data.results.flatMap((r: any) => r.history || []);
-        setAgentLog(flattenedHistory);
+        // 🚀 2. Save the AI's history into React state!
+        if (flattenedHistory.length > 0) {
+          // This adds the new logs to any existing logs
+          setAgentLog(prevLogs => [...prevLogs, ...flattenedHistory]);
+        }
         
         // Update scoreboard scores
         const scores: any = {};
@@ -432,65 +437,66 @@ export default function App() {
         <MachineGrid machines={machines} onMachineClick={setSelectedMachine} />
       </div>
 
-      {/* 🚀 3. The Upgraded Glassmorphism Detail Modal */}
+      {/* 🚀 The Upgraded Split-Screen Glassmorphism Modal */}
       <Dialog open={!!selectedMachine} onOpenChange={() => setSelectedMachine(null)}>
-        {/* Glassmorphism wrapper: Translucent dark background with a heavy blur and subtle glowing border */}
-        <DialogContent className="max-w-2xl bg-slate-950/60 backdrop-blur-xl border border-cyan-900/50 text-white shadow-[0_0_40px_rgba(6,182,212,0.15)]">
-          <DialogHeader>
+        {/* Expanded to max-w-5xl for side-by-side layout */}
+        <DialogContent className="max-w-5xl bg-slate-950/80 backdrop-blur-2xl border border-cyan-900/50 text-white shadow-[0_0_50px_rgba(6,182,212,0.15)]">
+          
+          {/* Header Section */}
+          <DialogHeader className="border-b border-white/10 pb-4">
             <div className="flex justify-between items-start">
               <div>
                 <DialogTitle className="text-3xl font-bold tracking-tight bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent drop-shadow-md">
-                  Machine Details: {selectedMachine?.id}
+                  Machine Diagnostics: {selectedMachine?.id}
                 </DialogTitle>
-                <DialogDescription className="mt-3 flex items-center gap-2 text-slate-300">
-                  System Status: 
-                  <span className={`px-2 py-0.5 rounded text-xs font-bold tracking-widest ${
+                <DialogDescription className="mt-2 flex items-center gap-2 text-slate-300">
+                  System State: 
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold tracking-widest uppercase ${
                     selectedMachine?.status === 'critical' ? 'bg-red-500/20 text-red-400 border border-red-500/50 shadow-[0_0_10px_rgba(239,68,68,0.3)]' : 'bg-green-500/20 text-green-400 border border-green-500/50 shadow-[0_0_10px_rgba(34,197,94,0.3)]'
                   }`}>
-                    {selectedMachine?.status?.toUpperCase()}
+                    {selectedMachine?.status}
                   </span>
                 </DialogDescription>
               </div>
             </div>
           </DialogHeader>
 
-          {/* 🚀 THE "NORMAL HUMAN" TRANSLATOR: Explains the problem in plain English */}
+          {/* Human-Readable Warning */}
           {selectedMachine?.status === 'critical' && (
-            <div className="bg-red-950/40 border-l-4 border-red-500 p-4 rounded-r-lg mt-2 shadow-inner">
-              <h4 className="text-red-400 font-semibold mb-1 flex items-center gap-2">
-                ⚠️ Human-Readable Diagnosis
+            <div className="bg-red-950/40 border-l-4 border-red-500 p-3 rounded-r-lg shadow-inner">
+              <h4 className="text-red-400 font-semibold text-sm flex items-center gap-2">
+                ⚠️ Critical Resource Exhaustion Detected
               </h4>
-              <p className="text-sm text-red-200/80 leading-relaxed">
-                This server is currently experiencing severe resource exhaustion. Several background services are consuming an unsustainable amount of CPU power. If the AI agent does not intervene and terminate the anomalous processes, the system may crash.
-              </p>
             </div>
           )}
 
-          <div className="mt-6 space-y-6">
-            {/* SECTION A: Live Processes with Visual Bars */}
-            <div>
-              <h3 className="text-lg font-semibold text-slate-300 mb-3 tracking-wide">
-                📊 Live Telemetry
+          {/* 🚀 THE SPLIT-SCREEN LAYOUT */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+            
+            {/* LEFT COLUMN: Live Telemetry */}
+            <div className="flex flex-col">
+              <h3 className="text-sm font-bold text-slate-400 mb-3 tracking-widest uppercase flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse"></div>
+                Live Telemetry
               </h3>
-              {/* Inner Glassmorphism panel for data */}
-              <div className="bg-black/40 border border-white/10 p-4 rounded-xl h-56 overflow-y-auto font-mono text-sm shadow-[inset_0_0_20px_rgba(0,0,0,0.5)]">
-                {selectedMachine?.processes?.map((proc: any) => (
-                   <div key={proc.pid} className="flex flex-col mb-4 pb-4 border-b border-white/5 last:border-0 last:mb-0 last:pb-0">
+              
+              <div className="bg-black/40 border border-white/10 p-4 rounded-xl flex-grow h-[400px] overflow-y-auto font-mono text-sm shadow-[inset_0_0_20px_rgba(0,0,0,0.5)] scrollbar-thin scrollbar-thumb-cyan-900 scrollbar-track-transparent">
+                {selectedMachine?.processes.map((proc: any) => (
+                   <div key={proc.pid} className="mb-4 pb-4 border-b border-white/5 last:border-0 last:mb-0 last:pb-0">
                      <div className="flex justify-between items-end mb-2">
-                       <span className="text-slate-200">
-                         <span className="text-slate-500 mr-2 text-xs">PID:{proc.pid}</span> 
+                       <span className="text-slate-200 truncate pr-2">
+                         <span className="text-slate-500 mr-2 text-xs">[{proc.pid}]</span> 
                          {proc.name}
                        </span>
-                       {/* 🚀 Format decimals to 1 place (e.g., 45.8%) */}
                        <span className={`font-bold ${proc.cpu_pct > 50 ? "text-red-400 drop-shadow-[0_0_5px_rgba(239,68,68,0.8)]" : "text-cyan-400"}`}>
                          {Number(proc.cpu_pct).toFixed(1)}%
                        </span>
                      </div>
                      
-                     {/* 🚀 Visual Progress Bar for CPU */}
-                     <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                     {/* Visual Progress Bar */}
+                     <div className="w-full bg-slate-900 rounded-full h-1 overflow-hidden">
                        <div
-                         className={`h-1.5 rounded-full transition-all duration-500 ${proc.cpu_pct > 50 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,1)]' : 'bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,1)]'}`}
+                         className={`h-1 rounded-full transition-all duration-500 ${proc.cpu_pct > 50 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,1)]' : 'bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,1)]'}`}
                          style={{ width: `${Math.min(proc.cpu_pct, 100)}%` }}
                        ></div>
                      </div>
@@ -499,34 +505,48 @@ export default function App() {
               </div>
             </div>
 
-            {/* SECTION B: AI Action Log */}
-            <div>
-              <h3 className="text-lg font-semibold text-purple-400 mb-3 tracking-wide drop-shadow-md">
-                🧠 AI Resolution Log
+            {/* RIGHT COLUMN: AI Brain Log */}
+            <div className="flex flex-col">
+              <h3 className="text-sm font-bold text-purple-400 mb-3 tracking-widest uppercase flex items-center gap-2 drop-shadow-md">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                Neural Engine Log
               </h3>
-              {/* Deep inset shadow to look like a hardware console */}
-              <div className="bg-purple-950/20 border border-purple-500/20 p-4 rounded-xl text-sm shadow-[inset_0_0_30px_rgba(168,85,247,0.05)]">
-                {agentLog.filter(log => log.machine === selectedMachine?.id).length > 0 ? (
-                  agentLog.filter(log => log.machine === selectedMachine?.id).map((log, i) => (
-                    <div key={i} className="mb-3 last:mb-0 bg-black/50 p-3 rounded-lg border border-purple-500/30">
-                      <div className="flex items-start gap-3 mb-2">
-                         <span className="text-green-400 font-bold bg-green-400/10 border border-green-400/20 px-2 py-0.5 rounded text-xs uppercase tracking-wider">Action</span>
-                         <span className="text-slate-200">{log.command}</span>
-                      </div>
-                      <div className="flex items-start gap-3">
-                         <span className="text-purple-400 font-bold bg-purple-400/10 border border-purple-400/20 px-2 py-0.5 rounded text-xs uppercase tracking-wider">Logic</span>
-                         <span className="text-slate-300 italic">{log.reasoning}</span>
+              
+              <div className="bg-[#0a0a16] border border-purple-500/20 p-4 rounded-xl flex-grow h-[400px] overflow-y-auto text-sm shadow-[inset_0_0_30px_rgba(168,85,247,0.05)] scrollbar-thin scrollbar-thumb-purple-900 scrollbar-track-transparent">
+                
+                {/* Check if we have logs for this specific machine */}
+                {agentLog.filter(log => String(log.machine) === String(selectedMachine?.id)).length > 0 ? (
+                  
+                  // Map through the logs
+                  agentLog.filter(log => String(log.machine) === String(selectedMachine?.id)).map((log, i) => (
+                    <div key={i} className="mb-4 last:mb-0 bg-black/60 p-3 rounded-lg border border-purple-500/30 relative overflow-hidden">
+                      {/* Glowing accent line on the left */}
+                      <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-purple-400 to-blue-500"></div>
+                      
+                      <div className="pl-2">
+                        <div className="flex items-start gap-2 mb-2">
+                           <span className="text-green-400 font-mono font-bold bg-green-400/10 px-1.5 py-0.5 rounded text-[10px] uppercase">Executed</span>
+                           <span className="text-slate-200 font-mono text-xs mt-0.5">{log.command}</span>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                           <span className="text-purple-400 font-mono font-bold text-[10px] uppercase tracking-wider">Analysis</span>
+                           <span className="text-slate-400 leading-relaxed text-xs">{log.reasoning}</span>
+                        </div>
                       </div>
                     </div>
                   ))
+                  
                 ) : (
-                  <span className="text-slate-500 italic flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-purple-500/50 animate-pulse"></span>
-                    Standing by. No AI actions executed on this machine yet.
-                  </span>
+                  // Empty State
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-50">
+                    <svg className="w-12 h-12 text-purple-500 mb-3 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                    <span className="text-purple-300 font-mono text-xs">AWAITING NEURAL LINK...</span>
+                    <span className="text-slate-500 text-xs mt-1 max-w-[200px]">No actions have been executed by the AI on this specific node yet.</span>
+                  </div>
                 )}
               </div>
             </div>
+
           </div>
         </DialogContent>
       </Dialog>
