@@ -46,20 +46,22 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
 
     for machine in fleet:
         if machine["status"] in ("critical", "degraded"):
+            # 1. Look for anomaly flag, obvious CPU hogs (> 80%), or zombie states
             for proc in machine["processes"]:
-                if proc.get("is_anomaly"):
+                if proc.get("is_anomaly") or proc.get("cpu_pct", 0) > 80.0 or proc.get("state") in ["zombie", "defunct"]:
                     return {
                         "machine_id": machine["id"],
                         "command": "kill_pid",
                         "target": str(proc["pid"]),
                     }
-            # No anomaly found but machine is critical — restart highest CPU proc
+            
+            # 2. If no obvious hogs, just kill the highest CPU process as a last resort
             if machine["processes"]:
-                worst = max(machine["processes"], key=lambda p: p["cpu_pct"])
+                highest_cpu_proc = max(machine["processes"], key=lambda p: p.get("cpu_pct", 0))
                 return {
                     "machine_id": machine["id"],
-                    "command": "restart_service",
-                    "target": worst["name"],
+                    "command": "kill_pid",
+                    "target": str(highest_cpu_proc["pid"]),
                 }
 
     # All healthy — noop
