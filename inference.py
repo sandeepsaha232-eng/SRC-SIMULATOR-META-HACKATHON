@@ -48,11 +48,26 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
         if machine["status"] in ("critical", "degraded"):
             # 1. Look for anomaly flag, obvious CPU hogs (> 80%), or zombie states
             for proc in machine["processes"]:
-                if proc.get("is_anomaly") or proc.get("cpu_pct", 0) > 80.0 or proc.get("state") in ["zombie", "defunct"]:
+                if proc.get("is_anomaly"):
                     return {
                         "machine_id": machine["id"],
                         "command": "kill_pid",
                         "target": str(proc["pid"]),
+                        "reasoning": f"Anomaly flag detected on process {proc['pid']}."
+                    }
+                if proc.get("cpu_pct", 0) > 80.0:
+                    return {
+                        "machine_id": machine["id"],
+                        "command": "kill_pid",
+                        "target": str(proc["pid"]),
+                        "reasoning": f"High CPU usage ({proc['cpu_pct']}%) detected on process {proc['pid']}."
+                    }
+                if proc.get("state") in ["zombie", "defunct"]:
+                    return {
+                        "machine_id": machine["id"],
+                        "command": "kill_pid",
+                        "target": str(proc["pid"]),
+                        "reasoning": f"Zombie/defunct process state detected on PID {proc['pid']}."
                     }
             
             # 2. If no obvious hogs, just kill the highest CPU process as a last resort
@@ -62,6 +77,7 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
                     "machine_id": machine["id"],
                     "command": "kill_pid",
                     "target": str(highest_cpu_proc["pid"]),
+                    "reasoning": f"Emergency triage: Killing highest CPU process (PID {highest_cpu_proc['pid']}) on critical node."
                 }
 
     # All healthy — noop
@@ -69,6 +85,7 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
         "machine_id": fleet[0]["id"] if fleet else "m-001",
         "command": "noop",
         "target": None,
+        "reasoning": "Fleet status healthy. Monitoring for anomalies."
     }
 
 
@@ -98,7 +115,7 @@ Dependency map (fix dependencies first):
 {json.dumps(obs.get('dependencies', {}), indent=2)}
 
 Return ONLY valid JSON with these exact keys:
-{{"machine_id": "string", "command": "kill_pid|restart_service|reboot|noop", "target": "pid_or_service_name_or_null"}}
+{{"machine_id": "string", "command": "kill_pid|restart_service|reboot|noop", "target": "pid_or_service_name_or_null", "reasoning": "short explanation of reasoning"}}
 
 Rules:
 - Prefer kill_pid for anomaly processes
@@ -128,6 +145,7 @@ Rules:
 def run_task(task_name: str, client=None) -> dict:
     """Run one full episode for a task, return result dict."""
     with httpx.Client(base_url=BASE_URL, timeout=30.0) as http:
+        action_log = [] # 🚀 1. Create an empty list to store the history
 
         # Reset
         resp = http.post("/reset", json={"task_name": task_name})
@@ -146,8 +164,26 @@ def run_task(task_name: str, client=None) -> dict:
             except Exception:
                 action = heuristic_action(obs, task_name)
 
+            # 🚀 2. Record what the agent decided to do
+            target_str = action.get('target', 'None')
+            command_str = {
+                "kill_pid": f"Killed PID {target_str}",
+                "restart_service": f"Restarted service: {target_str}",
+                "reboot": "Rebooted machine"
+            }.get(action['command'], f"{action['command']} on {target_str}")
+            
+            reasoning = action.get("reasoning", "Targeted anomalous process on critical node.")
+            if action['command'] == "noop":
+                command_str = "No action required"
+
+            action_log.append({
+                "machine": action["machine_id"],
+                "command": command_str,
+                "reasoning": reasoning
+            })
+
             # Print the narrative BEFORE taking the step
-            print(f"[Step {steps + 1}] Agent decided to: {action['command']} on {action['machine_id']} (Target: {action.get('target', 'None')})")
+            print(f"[Step {steps + 1}] Agent decided to: {action['command']} on {action['machine_id']} (Target: {target_str})")
 
             # Step
             resp = http.post("/step", json=action)
@@ -170,6 +206,7 @@ def run_task(task_name: str, client=None) -> dict:
             "score": grader.get("score", 0.0),
             "steps": steps,
             "feedback": grader.get("feedback", []),
+            "history": action_log
         }
 
 
@@ -207,7 +244,7 @@ def run_all_tasks() -> dict:
     print(f"\nTotal: {total:.2f} / {len(results)}.0")
 
     return {
-        "results": [{"task": r["task"], "score": r["score"], "steps": r["steps"]} for r in results],
+        "results": [{"task": r["task"], "score": r["score"], "steps": r["steps"], "history": r.get("history", [])} for r in results],
         "total": round(total, 4),
         "max": float(len(results)),
     }

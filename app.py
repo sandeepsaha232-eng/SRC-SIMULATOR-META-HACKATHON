@@ -71,6 +71,7 @@ class BaselineResultItem(BaseModel):
     task: str
     score: float
     steps: int
+    history: List[dict] = Field(default_factory=list)
 
 
 class BaselineResponse(BaseModel):

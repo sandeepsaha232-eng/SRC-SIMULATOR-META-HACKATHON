@@ -1,21 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import Masonry, { ResponsiveMasonry } from 'react-responsive-masonry';
 import { motion } from 'motion/react';
-import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./components/ui/dialog";
 
 export type StatusState = 'OK' | 'WARN' | 'FAIL';
 
 export interface Machine {
   id: string;
   state: StatusState;
+  status: string;
   host: string;
   mem: string;
   disk: string;
   procs: number;
   deps: string;
   syslog: string;
+  processes: any[];
 }
 
 const containerVariants = {
@@ -27,7 +29,7 @@ const itemVariants = {
   hidden: { opacity: 0, y: 20, rotateX: 30, scale: 0.9 },
   visible: { 
     opacity: 1, y: 0, rotateX: 0, scale: 1,
-    transition: { type: "spring", stiffness: 100, damping: 15 } 
+    transition: { type: "spring" as const, stiffness: 100, damping: 15 } 
   }
 };
 
@@ -122,8 +124,8 @@ const TelemetryPanel = ({ chartData, sysState }: { chartData: any[], sysState: a
   );
 };
 
-const MachineCard = ({ machine }: { machine: Machine }) => {
-  let containerClasses = "flex flex-col p-5 mb-4 relative z-10 transition-all duration-300 backdrop-blur-xl rounded-lg ";
+const MachineCard = ({ machine, onClick }: { machine: Machine; onClick: () => void }) => {
+  let containerClasses = "flex flex-col p-5 mb-4 relative z-10 transition-all duration-300 backdrop-blur-xl rounded-lg cursor-pointer ";
   let statusText = '';
   let statusColor = '';
   let idColor = '#00ff41';
@@ -150,9 +152,10 @@ const MachineCard = ({ machine }: { machine: Machine }) => {
       variants={itemVariants}
       whileHover={{ 
         scale: 1.03, rotateY: 8, rotateX: -8, z: 50,
-        transition: { type: "spring", stiffness: 300, damping: 20 }
+        transition: { type: "spring" as const, stiffness: 300, damping: 20 }
       }}
       className={containerClasses}
+      onClick={onClick}
       style={{ transformStyle: "preserve-3d" }}
     >
       <div className="flex justify-between items-center mb-3 transform-gpu translate-z-[30px]">
@@ -182,7 +185,7 @@ const MachineCard = ({ machine }: { machine: Machine }) => {
   );
 };
 
-const MachineGrid = ({ machines }: { machines: Machine[] }) => {
+const MachineGrid = ({ machines, onMachineClick }: { machines: Machine[]; onMachineClick: (m: Machine) => void }) => {
   return (
     <motion.div 
       variants={containerVariants}
@@ -194,7 +197,7 @@ const MachineGrid = ({ machines }: { machines: Machine[] }) => {
       <ResponsiveMasonry columnsCountBreakPoints={{ 350: 1, 750: 2, 1024: 3, 1440: 4 }}>
         <Masonry gutter="20px">
           {machines.map((machine) => (
-            <MachineCard key={machine.id} machine={machine} />
+            <MachineCard key={machine.id} machine={machine} onClick={() => onMachineClick(machine)} />
           ))}
         </Masonry>
       </ResponsiveMasonry>
@@ -207,7 +210,10 @@ const MachineGrid = ({ machines }: { machines: Machine[] }) => {
   );
 };
 
-const MissionControl = () => {
+const MissionControl = ({ setAgentLog, setSysState }: { 
+  setAgentLog: (log: any[]) => void;
+  setSysState: React.Dispatch<React.SetStateAction<any>>;
+}) => {
   const [loading, setLoading] = useState(false);
 
   const triggerReset = async (task: string) => {
@@ -245,6 +251,24 @@ const MissionControl = () => {
       });
       clearTimeout(timeoutId);
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const data = await res.json();
+      if (data && data.results) {
+        const flattenedHistory = data.results.flatMap((r: any) => r.history || []);
+        setAgentLog(flattenedHistory);
+        
+        // Update scoreboard scores
+        const scores: any = {};
+        data.results.forEach((r: any) => {
+          if (r.task === 'single_machine') scores.single = r.score.toFixed(2);
+          if (r.task === 'multi_machine') scores.multi = r.score.toFixed(2);
+          if (r.task === 'cascade_failure') scores.cascade = r.score.toFixed(2);
+        });
+        
+        setSysState((prev: any) => ({
+          ...prev,
+          ...scores
+        }));
+      }
     } catch (e: any) {
       console.error('Baseline failed (120s):', e.message);
       alert(`BASELINE FAILED: ${e.name === 'AbortError' ? 'Request timed out (120s)' : e.message}`);
@@ -304,6 +328,11 @@ export default function App() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [chartData, setChartData] = useState<any[]>([]);
   const [sysState, setSysState] = useState({ task: 'AWAITING_AGENT', step: 0, done: false, single: '1.00', multi: '1.00', cascade: '0.74' });
+  const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
+  const [agentLog, setAgentLog] = useState<any[]>([
+    { machine: 'm-001', command: 'kill_pid', reasoning: 'Detected zombie process consuming excessive CPU resources.' },
+    { machine: 'm-002', command: 'restart_service', reasoning: 'Memory leak threshold exceeded; cycling service to free heap.' }
+  ]);
 
   useEffect(() => {
     let tickCount = 0;
@@ -338,14 +367,22 @@ export default function App() {
           let sysLines = Array.isArray(m.syslog_tail) ? m.syslog_tail.join('\n') : m.syslog_tail;
           return {
             id: m.id, state, host: m.hostname,
+            status: m.status,
             mem: (m.mem_used || 0).toFixed(1) + '%',
             disk: (m.disk_pct || 0).toFixed(1) + '%',
             procs: m.processes ? m.processes.length : 0,
             deps: m.dependencies && m.dependencies.length > 0 ? m.dependencies.join(', ') : 'none',
-            syslog: '> root@' + m.hostname + ':~# tail -f /var/log/syslog\n' + sysLines
+            syslog: '> root@' + m.hostname + ':~# tail -f /var/log/syslog\n' + sysLines,
+            processes: m.processes || []
           };
         });
         setMachines(newMachines);
+        
+        // Update selectedMachine reference if it exists
+        if (selectedMachine) {
+          const updated = newMachines.find(m => m.id === selectedMachine.id);
+          if (updated) setSelectedMachine(updated);
+        }
         
         const hCount = data.fleet.filter((m: any) => m.status === 'healthy').length;
         const ratio = data.fleet.length > 0 ? hCount / data.fleet.length : 0;
@@ -390,10 +427,58 @@ export default function App() {
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 py-4">
         <Header sysState={sysState} />
-        <MissionControl />
+        <MissionControl setAgentLog={setAgentLog} setSysState={setSysState} />
         <TelemetryPanel chartData={chartData} sysState={sysState} />
-        <MachineGrid machines={machines} />
+        <MachineGrid machines={machines} onMachineClick={setSelectedMachine} />
       </div>
+
+      {/* 🚀 3. The Detail Modal */}
+      <Dialog open={!!selectedMachine} onOpenChange={() => setSelectedMachine(null)}>
+        <DialogContent className="max-w-2xl bg-slate-900 text-white border-slate-700">
+          <DialogHeader>
+            <DialogTitle className="text-2xl text-cyan-400">
+              Machine Details: {selectedMachine?.id}
+            </DialogTitle>
+            <DialogDescription>
+              Status: <span className={selectedMachine?.status === 'critical' ? 'text-red-500' : 'text-green-500'}>
+                {selectedMachine?.status.toUpperCase()}
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-4 space-y-6">
+            {/* SECTION A: Live Processes */}
+            <div>
+              <h3 className="text-lg font-semibold text-slate-300 mb-2">Live Processes</h3>
+              <div className="bg-slate-950 p-3 rounded-md h-48 overflow-y-auto font-mono text-sm">
+                {selectedMachine?.processes.map((proc: any) => (
+                   <div key={proc.pid} className="flex justify-between border-b border-slate-800 py-1">
+                     <span>PID: {proc.pid} | {proc.name}</span>
+                     <span className={proc.cpu_pct > 50 ? "text-red-400" : "text-slate-400"}>CPU: {proc.cpu_pct}%</span>
+                   </div>
+                ))}
+              </div>
+            </div>
+
+            {/* SECTION B: AI Action Log (What did the agent do here?) */}
+            <div>
+              <h3 className="text-lg font-semibold text-purple-400 mb-2">AI Resolution Log</h3>
+              <div className="bg-slate-950 border border-purple-900/50 p-3 rounded-md text-sm">
+                {agentLog.filter(log => log.machine === selectedMachine?.id).length > 0 ? (
+                  agentLog.filter(log => log.machine === selectedMachine?.id).map((log, i) => (
+                    <div key={i} className="mb-2 last:mb-0">
+                      <span className="text-green-400 font-bold">Action:</span> {log.command} <br/>
+                      <span className="text-slate-400 font-bold">Reasoning:</span> {log.reasoning}
+                    </div>
+                  ))
+                ) : (
+                  <span className="text-slate-500 italic">No AI actions recorded for this machine yet.</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
