@@ -432,47 +432,98 @@ export default function App() {
         <MachineGrid machines={machines} onMachineClick={setSelectedMachine} />
       </div>
 
-      {/* 🚀 3. The Detail Modal */}
+      {/* 🚀 3. The Upgraded Glassmorphism Detail Modal */}
       <Dialog open={!!selectedMachine} onOpenChange={() => setSelectedMachine(null)}>
-        <DialogContent className="max-w-2xl bg-slate-900 text-white border-slate-700">
+        {/* Glassmorphism wrapper: Translucent dark background with a heavy blur and subtle glowing border */}
+        <DialogContent className="max-w-2xl bg-slate-950/60 backdrop-blur-xl border border-cyan-900/50 text-white shadow-[0_0_40px_rgba(6,182,212,0.15)]">
           <DialogHeader>
-            <DialogTitle className="text-2xl text-cyan-400">
-              Machine Details: {selectedMachine?.id}
-            </DialogTitle>
-            <DialogDescription>
-              Status: <span className={selectedMachine?.status === 'critical' ? 'text-red-500' : 'text-green-500'}>
-                {selectedMachine?.status.toUpperCase()}
-              </span>
-            </DialogDescription>
+            <div className="flex justify-between items-start">
+              <div>
+                <DialogTitle className="text-3xl font-bold tracking-tight bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent drop-shadow-md">
+                  Machine Details: {selectedMachine?.id}
+                </DialogTitle>
+                <DialogDescription className="mt-3 flex items-center gap-2 text-slate-300">
+                  System Status: 
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold tracking-widest ${
+                    selectedMachine?.status === 'critical' ? 'bg-red-500/20 text-red-400 border border-red-500/50 shadow-[0_0_10px_rgba(239,68,68,0.3)]' : 'bg-green-500/20 text-green-400 border border-green-500/50 shadow-[0_0_10px_rgba(34,197,94,0.3)]'
+                  }`}>
+                    {selectedMachine?.status?.toUpperCase()}
+                  </span>
+                </DialogDescription>
+              </div>
+            </div>
           </DialogHeader>
 
-          <div className="mt-4 space-y-6">
-            {/* SECTION A: Live Processes */}
+          {/* 🚀 THE "NORMAL HUMAN" TRANSLATOR: Explains the problem in plain English */}
+          {selectedMachine?.status === 'critical' && (
+            <div className="bg-red-950/40 border-l-4 border-red-500 p-4 rounded-r-lg mt-2 shadow-inner">
+              <h4 className="text-red-400 font-semibold mb-1 flex items-center gap-2">
+                ⚠️ Human-Readable Diagnosis
+              </h4>
+              <p className="text-sm text-red-200/80 leading-relaxed">
+                This server is currently experiencing severe resource exhaustion. Several background services are consuming an unsustainable amount of CPU power. If the AI agent does not intervene and terminate the anomalous processes, the system may crash.
+              </p>
+            </div>
+          )}
+
+          <div className="mt-6 space-y-6">
+            {/* SECTION A: Live Processes with Visual Bars */}
             <div>
-              <h3 className="text-lg font-semibold text-slate-300 mb-2">Live Processes</h3>
-              <div className="bg-slate-950 p-3 rounded-md h-48 overflow-y-auto font-mono text-sm">
-                {selectedMachine?.processes.map((proc: any) => (
-                   <div key={proc.pid} className="flex justify-between border-b border-slate-800 py-1">
-                     <span>PID: {proc.pid} | {proc.name}</span>
-                     <span className={proc.cpu_pct > 50 ? "text-red-400" : "text-slate-400"}>CPU: {proc.cpu_pct}%</span>
+              <h3 className="text-lg font-semibold text-slate-300 mb-3 tracking-wide">
+                📊 Live Telemetry
+              </h3>
+              {/* Inner Glassmorphism panel for data */}
+              <div className="bg-black/40 border border-white/10 p-4 rounded-xl h-56 overflow-y-auto font-mono text-sm shadow-[inset_0_0_20px_rgba(0,0,0,0.5)]">
+                {selectedMachine?.processes?.map((proc: any) => (
+                   <div key={proc.pid} className="flex flex-col mb-4 pb-4 border-b border-white/5 last:border-0 last:mb-0 last:pb-0">
+                     <div className="flex justify-between items-end mb-2">
+                       <span className="text-slate-200">
+                         <span className="text-slate-500 mr-2 text-xs">PID:{proc.pid}</span> 
+                         {proc.name}
+                       </span>
+                       {/* 🚀 Format decimals to 1 place (e.g., 45.8%) */}
+                       <span className={`font-bold ${proc.cpu_pct > 50 ? "text-red-400 drop-shadow-[0_0_5px_rgba(239,68,68,0.8)]" : "text-cyan-400"}`}>
+                         {Number(proc.cpu_pct).toFixed(1)}%
+                       </span>
+                     </div>
+                     
+                     {/* 🚀 Visual Progress Bar for CPU */}
+                     <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                       <div
+                         className={`h-1.5 rounded-full transition-all duration-500 ${proc.cpu_pct > 50 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,1)]' : 'bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,1)]'}`}
+                         style={{ width: `${Math.min(proc.cpu_pct, 100)}%` }}
+                       ></div>
+                     </div>
                    </div>
                 ))}
               </div>
             </div>
 
-            {/* SECTION B: AI Action Log (What did the agent do here?) */}
+            {/* SECTION B: AI Action Log */}
             <div>
-              <h3 className="text-lg font-semibold text-purple-400 mb-2">AI Resolution Log</h3>
-              <div className="bg-slate-950 border border-purple-900/50 p-3 rounded-md text-sm">
+              <h3 className="text-lg font-semibold text-purple-400 mb-3 tracking-wide drop-shadow-md">
+                🧠 AI Resolution Log
+              </h3>
+              {/* Deep inset shadow to look like a hardware console */}
+              <div className="bg-purple-950/20 border border-purple-500/20 p-4 rounded-xl text-sm shadow-[inset_0_0_30px_rgba(168,85,247,0.05)]">
                 {agentLog.filter(log => log.machine === selectedMachine?.id).length > 0 ? (
                   agentLog.filter(log => log.machine === selectedMachine?.id).map((log, i) => (
-                    <div key={i} className="mb-2 last:mb-0">
-                      <span className="text-green-400 font-bold">Action:</span> {log.command} <br/>
-                      <span className="text-slate-400 font-bold">Reasoning:</span> {log.reasoning}
+                    <div key={i} className="mb-3 last:mb-0 bg-black/50 p-3 rounded-lg border border-purple-500/30">
+                      <div className="flex items-start gap-3 mb-2">
+                         <span className="text-green-400 font-bold bg-green-400/10 border border-green-400/20 px-2 py-0.5 rounded text-xs uppercase tracking-wider">Action</span>
+                         <span className="text-slate-200">{log.command}</span>
+                      </div>
+                      <div className="flex items-start gap-3">
+                         <span className="text-purple-400 font-bold bg-purple-400/10 border border-purple-400/20 px-2 py-0.5 rounded text-xs uppercase tracking-wider">Logic</span>
+                         <span className="text-slate-300 italic">{log.reasoning}</span>
+                      </div>
                     </div>
                   ))
                 ) : (
-                  <span className="text-slate-500 italic">No AI actions recorded for this machine yet.</span>
+                  <span className="text-slate-500 italic flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-purple-500/50 animate-pulse"></span>
+                    Standing by. No AI actions executed on this machine yet.
+                  </span>
                 )}
               </div>
             </div>
