@@ -125,22 +125,18 @@ const TelemetryPanel = ({ chartData, sysState }: { chartData: any[], sysState: a
 };
 
 const MachineCard = ({ machine, onClick }: { machine: Machine; onClick: () => void }) => {
-  let containerClasses = "flex flex-col p-5 mb-4 relative z-10 transition-all duration-300 backdrop-blur-xl rounded-lg cursor-pointer ";
   let statusText = '';
   let statusColor = '';
   let idColor = '#00ff41';
 
   if (machine.state === 'OK') {
-    containerClasses += "bg-[rgba(10,10,12,0.65)] border border-[#008f11]/60 shadow-[0_8px_32px_rgba(0,143,17,0.15)] hover:shadow-[0_12px_40px_rgba(0,143,17,0.3)]";
     statusText = '[ OK ]';
     statusColor = 'text-[#00d4aa]';
   } else if (machine.state === 'WARN') {
-    containerClasses += "bg-[rgba(252,232,58,0.05)] border border-[#fce83a]/80 shadow-[0_8px_32px_rgba(252,232,58,0.2)] hover:shadow-[0_12px_40px_rgba(252,232,58,0.4)]";
     statusText = '[ WARN ]';
     statusColor = 'text-[#fce83a] drop-shadow-[0_0_8px_#fce83a]';
     idColor = '#fce83a';
   } else if (machine.state === 'FAIL') {
-    containerClasses += "bg-[rgba(255,0,60,0.1)] border border-[#ff003c] shadow-[0_8px_32px_rgba(255,0,60,0.4)] hover:shadow-[0_12px_40px_rgba(255,0,60,0.6)] animate-pulse-red";
     statusText = '[ FAIL ]';
     statusColor = 'text-[#ff003c] drop-shadow-[0_0_12px_#ff003c]';
     idColor = '#ff003c';
@@ -154,32 +150,37 @@ const MachineCard = ({ machine, onClick }: { machine: Machine; onClick: () => vo
         scale: 1.03, rotateY: 8, rotateX: -8, z: 50,
         transition: { type: "spring" as const, stiffness: 300, damping: 20 }
       }}
-      className={containerClasses}
+      className={`relative overflow-hidden bg-slate-950/40 backdrop-blur-3xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.3)] transition-all duration-300 hover:bg-slate-900/50 hover:border-cyan-500/50 hover:shadow-[0_0_40px_rgba(6,182,212,0.2)] group cursor-pointer mb-4 ${machine.state === 'FAIL' ? 'animate-pulse-red border-red-500/50' : ''}`}
       onClick={onClick}
       style={{ transformStyle: "preserve-3d" }}
     >
-      <div className="flex justify-between items-center mb-3 transform-gpu translate-z-[30px]">
-        <span className="font-bold text-lg" style={{ color: idColor, textShadow: machine.state === 'FAIL' ? '0 0 12px #ff003c' : '0 0 8px currentColor' }}>
-          {machine.id}
-        </span>
-        <span className={`font-bold ${statusColor} tracking-widest`}>{statusText}</span>
-      </div>
-      <div className="border-t border-dashed border-[#008f11] opacity-50 mb-4 transform-gpu translate-z-[20px]" />
-      
-      <div className="grid grid-cols-2 gap-3 text-xs md:text-sm mb-5 transform-gpu translate-z-[20px]">
-        <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">HOST</span><span className="text-[#00ff41] font-medium">{machine.host}</span></div>
-        <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">MEM_USED</span><span className="text-[#00ff41] font-medium">{machine.mem}</span></div>
-        <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">DISK_PCT</span><span className="text-[#00ff41] font-medium">{machine.disk}</span></div>
-        <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">PROCS</span><span className="text-[#00ff41] font-medium">{machine.procs}</span></div>
-      </div>
-      
-      <div className="text-xs flex items-center gap-2 transform-gpu translate-z-[20px]">
-        <span className="text-[#008f11]/70">DEPS:</span>
-        <span className="text-[#008f11] truncate">{machine.deps}</span>
-      </div>
+      {/* The "Liquid" Effect: A subtle, glowing animated gradient orb behind the card content */}
+      <div className={`absolute -top-24 -right-24 w-48 h-48 rounded-full blur-3xl opacity-50 group-hover:opacity-100 transition-opacity duration-500 ${machine.state === 'FAIL' ? 'bg-gradient-to-br from-red-500/50 to-orange-500/50' : 'bg-gradient-to-br from-cyan-500/20 to-purple-500/20'}`}></div>
 
-      <div className="mt-4 bg-[rgba(0,0,0,0.7)] backdrop-blur-md p-3 text-[10px] md:text-xs text-[#00ff41] border border-[#111111]/80 overflow-hidden whitespace-pre-wrap text-ellipsis font-bold rounded shadow-inner transform-gpu translate-z-[10px]">
-        {machine.syslog}<span className="inline-block w-[6px] h-[12px] bg-[#00ff41] ml-1 animate-[blink_1s_step-end_infinite] align-middle" />
+      <div className="relative z-10 p-4">
+        <div className="flex justify-between items-center mb-3 transform-gpu translate-z-[30px]">
+          <span className="font-bold text-lg" style={{ color: idColor, textShadow: machine.state === 'FAIL' ? '0 0 12px #ff003c' : '0 0 8px currentColor' }}>
+            {machine.id}
+          </span>
+          <span className={`font-bold ${statusColor} tracking-widest`}>{statusText}</span>
+        </div>
+        <div className="border-t border-dashed border-[#008f11] opacity-50 mb-4 transform-gpu translate-z-[20px]" />
+        
+        <div className="grid grid-cols-2 gap-3 text-xs md:text-sm mb-5 transform-gpu translate-z-[20px]">
+          <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">HOST</span><span className="text-[#00ff41] font-medium">{machine.host}</span></div>
+          <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">MEM_USED</span><span className="text-[#00ff41] font-medium">{machine.mem}</span></div>
+          <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">DISK_PCT</span><span className="text-[#00ff41] font-medium">{machine.disk}</span></div>
+          <div className="flex flex-col gap-1"><span className="text-[#008f11]/80">PROCS</span><span className="text-[#00ff41] font-medium">{machine.procs}</span></div>
+        </div>
+        
+        <div className="text-xs flex items-center gap-2 transform-gpu translate-z-[20px]">
+          <span className="text-[#008f11]/70">DEPS:</span>
+          <span className="text-[#008f11] truncate">{machine.deps}</span>
+        </div>
+
+        <div className="mt-4 bg-[rgba(0,0,0,0.7)] backdrop-blur-md p-3 text-[10px] md:text-xs text-[#00ff41] border border-[#111111]/80 overflow-hidden whitespace-pre-wrap text-ellipsis font-bold rounded shadow-inner transform-gpu translate-z-[10px]">
+          {machine.syslog}<span className="inline-block w-[6px] h-[12px] bg-[#00ff41] ml-1 animate-[blink_1s_step-end_infinite] align-middle" />
+        </div>
       </div>
     </motion.div>
   );
@@ -194,7 +195,7 @@ const MachineGrid = ({ machines, onMachineClick }: { machines: Machine[]; onMach
       className="w-full relative z-10 mb-20"
       style={{ perspective: 1500 }}
     >
-      <ResponsiveMasonry columnsCountBreakPoints={{ 350: 1, 750: 2, 1024: 3, 1440: 4 }}>
+      <ResponsiveMasonry columnsCountBreakPoints={{ 350: 1, 750: 2, 1024: 3, 1440: 3 }}>
         <Masonry gutter="20px">
           {machines.map((machine) => (
             <MachineCard key={machine.id} machine={machine} onClick={() => onMachineClick(machine)} />
