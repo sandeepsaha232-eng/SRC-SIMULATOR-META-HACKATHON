@@ -236,7 +236,7 @@ const MissionControl = () => {
   const triggerBaseline = async () => {
     setLoading(true);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 🚀 Change 10000 to 60000 (60 seconds)
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 🚀 120 seconds (2 minutes)
 
     try {
       const res = await fetch('/baseline', { 
@@ -246,8 +246,8 @@ const MissionControl = () => {
       clearTimeout(timeoutId);
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
     } catch (e: any) {
-      console.error('Baseline failed:', e.message);
-      alert(`BASELINE FAILED: ${e.name === 'AbortError' ? 'Request timed out (10s)' : e.message}`);
+      console.error('Baseline failed (120s):', e.message);
+      alert(`BASELINE FAILED: ${e.name === 'AbortError' ? 'Request timed out (120s)' : e.message}`);
     } finally {
       setLoading(false);
     }
