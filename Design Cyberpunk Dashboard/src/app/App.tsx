@@ -236,7 +236,7 @@ const MissionControl = () => {
   const triggerBaseline = async () => {
     setLoading(true);
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 10000);
+    const id = setTimeout(() => controller.abort(), 60000);
 
     try {
       const res = await fetch('/baseline', { 
