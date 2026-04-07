@@ -1,12 +1,6 @@
 """
 inference.py — Baseline inference script for SRE Fleet Gym.
-
-Uses the OpenAI API client (compatible with Groq/OpenAI).
-Reads credentials from environment variables.
-Falls back to deterministic heuristic if no API key found.
-
-Usage:
-    python inference.py
+Grader-Compliant Version.
 """
 
 from __future__ import annotations
@@ -18,24 +12,18 @@ import httpx
 # ── Config ──────────────────────────────────────────────────────────────────
 
 BASE_URL = os.environ.get("OPENENV_BASE_URL", "http://localhost:7860")
-API_KEY = os.environ.get("API_KEY", os.environ.get("OPENAI_API_KEY", ""))
-API_BASE_URL = os.environ.get("API_BASE_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-MODEL_NAME = os.environ.get("MODEL_NAME", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+# 🚨 Strictly using the exact variable names requested by the grader specs
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 MAX_STEPS = 25
 
 
 # ── Heuristic Agent (fallback, no LLM needed) ───────────────────────────────
 
 def heuristic_action(obs: dict, task_name: str) -> dict:
-    """
-    Deterministic heuristic: finds the anomaly process on the
-    most critical machine and kills it. Follows dependency order
-    for cascade_failure task.
-    """
     fleet = obs.get("fleet", [])
     dependencies = obs.get("dependencies", {})
-
-    # For cascade: sort machines by tier (db -> cache -> app -> edge -> mon)
     tier_order = {"db": 0, "cache": 1, "app": 2, "edge": 3, "mon": 4}
 
     if task_name == "cascade_failure":
@@ -46,7 +34,6 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
 
     for machine in fleet:
         if machine["status"] in ("critical", "degraded"):
-            # 1. Look for anomaly flag, obvious CPU hogs (> 80%), or zombie states
             for proc in machine["processes"]:
                 if proc.get("is_anomaly"):
                     return {
@@ -70,7 +57,6 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
                         "reasoning": f"Zombie/defunct process state detected on PID {proc['pid']}."
                     }
             
-            # 2. If no obvious hogs, just kill the highest CPU process as a last resort
             if machine["processes"]:
                 highest_cpu_proc = max(machine["processes"], key=lambda p: p.get("cpu_pct", 0))
                 return {
@@ -80,7 +66,6 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
                     "reasoning": f"Emergency triage: Killing highest CPU process (PID {highest_cpu_proc['pid']}) on critical node."
                 }
 
-    # All healthy — noop
     return {
         "machine_id": fleet[0]["id"] if fleet else "m-001",
         "command": "noop",
@@ -92,7 +77,6 @@ def heuristic_action(obs: dict, task_name: str) -> dict:
 # ── LLM Agent ───────────────────────────────────────────────────────────────
 
 def llm_action(obs: dict, task_name: str, client) -> dict:
-    """Use LLM to decide next action."""
     fleet_summary = []
     for m in obs["fleet"]:
         if m["status"] != "healthy":
@@ -111,17 +95,11 @@ Step: {obs['step_count']}
 Unhealthy machines:
 {json.dumps(fleet_summary, indent=2)}
 
-Dependency map (fix dependencies first):
+Dependency map:
 {json.dumps(obs.get('dependencies', {}), indent=2)}
 
 Return ONLY valid JSON with these exact keys:
-{{"machine_id": "string", "command": "kill_pid|restart_service|reboot|noop", "target": "pid_or_service_name_or_null", "reasoning": "short explanation of reasoning"}}
-
-Rules:
-- Prefer kill_pid for anomaly processes
-- Fix db- machines before cache-, cache- before app-, app- before edge-
-- Only use reboot as last resort
-- If all healthy, use noop"""
+{{"machine_id": "string", "command": "kill_pid|restart_service|reboot|noop", "target": "pid_or_service_name_or_null", "reasoning": "short explanation of reasoning"}}"""
 
     response = client.chat.completions.create(
         model=MODEL_NAME,
@@ -132,7 +110,6 @@ Rules:
     )
 
     raw = response.choices[0].message.content.strip()
-    # Strip markdown fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -143,28 +120,26 @@ Rules:
 # ── Episode Runner ───────────────────────────────────────────────────────────
 
 def run_task(task_name: str, client=None) -> dict:
-    """Run one full episode for a task, return result dict."""
     with httpx.Client(base_url=BASE_URL, timeout=30.0) as http:
-        action_log = [] # 🚀 1. Create an empty list to store the history
+        action_log = []
 
-        # Reset
         resp = http.post("/reset", json={"task_name": task_name})
         resp.raise_for_status()
         obs = resp.json()
 
-        print(f"\n--- Starting Mission: {task_name} ---")
+        # 🚨 STRICT GRADER FORMAT: ONLY print the requested tags
+        print("[START]")
+        
         steps = 0
         while not obs.get("done", False) and steps < MAX_STEPS:
-            # Choose action
             try:
-                if client and API_KEY:
+                if client and HF_TOKEN:
                     action = llm_action(obs, task_name, client)
                 else:
                     action = heuristic_action(obs, task_name)
             except Exception:
                 action = heuristic_action(obs, task_name)
 
-            # 🚀 2. Record what the agent decided to do
             target_str = action.get('target', 'None')
             command_str = {
                 "kill_pid": f"Killed PID {target_str}",
@@ -172,7 +147,7 @@ def run_task(task_name: str, client=None) -> dict:
                 "reboot": "Rebooted machine"
             }.get(action['command'], f"{action['command']} on {target_str}")
             
-            reasoning = action.get("reasoning", "Targeted anomalous process on critical node.")
+            reasoning = action.get("reasoning", "Targeted anomalous process.")
             if action['command'] == "noop":
                 command_str = "No action required"
 
@@ -182,28 +157,26 @@ def run_task(task_name: str, client=None) -> dict:
                 "reasoning": reasoning
             })
 
-            # Print the narrative BEFORE taking the step
-            print(f"[Step {steps + 1}] Agent decided to: {action['command']} on {action['machine_id']} (Target: {target_str})")
+            # 🚨 STRICT GRADER FORMAT: Must be a valid JSON string
+            print(f"[STEP] {json.dumps(action)}")
 
-            # Step
             resp = http.post("/step", json=action)
             resp.raise_for_status()
             obs = resp.json()
-            
-            # Calculate and print health ratio
-            healthy_count = sum(1 for m in obs["fleet"] if m["status"] == "healthy")
-            print(f"         Fleet Health: {healthy_count}/{len(obs['fleet'])} machines healthy. Current Reward: {obs.get('reward', 0):.2f}")
-            
             steps += 1
 
-        # Grade
         resp = http.post("/grader")
         resp.raise_for_status()
         grader = resp.json()
 
+        score = grader.get("score", 0.0)
+        
+        # 🚨 STRICT GRADER FORMAT
+        print(f"[END] Episode finished with score: {score}")
+
         return {
             "task": task_name,
-            "score": grader.get("score", 0.0),
+            "score": score,
             "steps": steps,
             "feedback": grader.get("feedback", []),
             "history": action_log
@@ -213,19 +186,15 @@ def run_task(task_name: str, client=None) -> dict:
 # ── Run All Tasks ────────────────────────────────────────────────────────────
 
 def run_all_tasks() -> dict:
-    """Run all 3 tasks and return combined results. Called by /baseline endpoint."""
-
-    # Try to init LLM client
     client = None
-    if API_KEY:
+    if HF_TOKEN:
         try:
             from openai import OpenAI
             client = OpenAI(
-                api_key=API_KEY,
-                base_url=API_BASE_URL,
+                api_key=HF_TOKEN,
+                base_url=API_BASE_URL
             )
         except Exception as e:
-            print(f"Failed to init OpenAI client: {e}")
             client = None
 
     task_names = ["single_machine", "multi_machine", "cascade_failure"]
@@ -235,13 +204,10 @@ def run_all_tasks() -> dict:
         try:
             result = run_task(task, client)
             results.append(result)
-            print(f"[{task}] Score: {result['score']:.2f} in {result['steps']} steps")
         except Exception as e:
-            print(f"[{task}] ERROR: {e}")
             results.append({"task": task, "score": 0.0, "steps": 0})
 
     total = sum(r["score"] for r in results)
-    print(f"\nTotal: {total:.2f} / {len(results)}.0")
 
     return {
         "results": [{"task": r["task"], "score": r["score"], "steps": r["steps"], "history": r.get("history", [])} for r in results],
@@ -250,8 +216,7 @@ def run_all_tasks() -> dict:
     }
 
 
-# ── CLI entrypoint ───────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     output = run_all_tasks()
+    # The final JSON block is kept for your dashboard to read
     print(json.dumps(output, indent=2))
