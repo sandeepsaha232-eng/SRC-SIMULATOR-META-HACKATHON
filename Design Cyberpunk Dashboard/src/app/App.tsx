@@ -440,8 +440,8 @@ export default function App() {
 
       {/* 🚀 The Upgraded Split-Screen Glassmorphism Modal */}
       <Dialog open={!!selectedMachine} onOpenChange={() => setSelectedMachine(null)}>
-        {/* Expanded to max-w-5xl for side-by-side layout */}
-        <DialogContent className="max-w-5xl bg-slate-950/80 backdrop-blur-2xl border border-cyan-900/50 text-white shadow-[0_0_50px_rgba(6,182,212,0.15)]">
+        {/* Expanded to max-w-7xl for a super-wide side-by-side layout */}
+        <DialogContent className="max-w-7xl w-[95vw] bg-slate-950/80 backdrop-blur-2xl border border-cyan-900/50 text-white shadow-[0_0_50px_rgba(6,182,212,0.15)]">
           
           {/* Header Section */}
           <DialogHeader className="border-b border-white/10 pb-4">
