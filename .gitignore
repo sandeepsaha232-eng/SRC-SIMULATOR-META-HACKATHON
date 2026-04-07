@@ -24,3 +24,5 @@ Design Cyberpunk Dashboard/node_modules/
 .vscode/
 .idea/
 node_modules/
+assets/*.png
+assets/*.jpg

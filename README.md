@@ -8,6 +8,10 @@ app_file: app.py
 pinned: false
 ---
 
+<p align="center">
+  <img src="./assets/hero.png" alt="SRE Fleet Gym Cyberpunk Dashboard" width="100%">
+</p>
+
 # 🚀 SRE Fleet Gym: A flight simulator for autonomous incident response agents
 
 > An OpenEnv-compliant reinforcement-learning environment dedicated to solving the enterprise infrastructure crisis.
@@ -16,6 +20,38 @@ pinned: false
 [https://sandeep8327-src-simulator-hackathon.hf.space](https://sandeep8327-src-simulator-hackathon.hf.space)
 
 *(The live dashboard is strictly read-only to prevent state mutation during agent evaluation. It will automatically poll and display the live state of the fleet once the agent initiates the /reset sequence.)*
+
+---
+
+## 🛠️ Tech Stack
+This project leverages a modern, high-performance stack:
+* **Frontend**: React, TailwindCSS, Framer Motion, Recharts, Radix UI / Shadcn
+* **Backend Engine**: FastAPI, Uvicorn, Python 3.10+
+* **AI Integration**: Groq LLM API (Llama 3 / Mixtral for high-speed deterministic JSON parsing)
+* **Deployment**: Docker, Hugging Face Spaces (OpenEnv compliant)
+* **Styling**: Cyberpunk-inspired Glassmorphism UI
+
+---
+
+## 🏗️ How It Works (Architecture)
+
+```mermaid
+graph TD
+    A[SRE Agent / LLM] <-->|Polls /state & POSTs /step Actions| B[FastAPI Engine]
+    B -->|Generates Anomalies & State| C[Simulated Fleet Array]
+    C -->|Telemetry & Syslogs| B
+    B <-->|Real-time Data Polling| D[React Glassmorphism Dashboard]
+    
+    style A fill:#8b5cf6,stroke:#c4b5fd,stroke-width:2px,color:#fff
+    style B fill:#10b981,stroke:#34d399,stroke-width:2px,color:#fff
+    style C fill:#3b82f6,stroke:#93c5fd,stroke-width:2px,color:#fff
+    style D fill:#f43f5e,stroke:#fda4af,stroke-width:2px,color:#fff
+```
+
+* **Simulated Server**: Dynamic Pydantic-enforced node states (CPU, Memory, Syslogs)
+* **FastAPI**: The core OpenEnv Gym simulator logic and API router
+* **LLM**: The autonomous SRE Copilot reading structured & unstructured data
+* **React Dashboard**: The beautiful mission control UI visualizing it all
 
 ---
 
