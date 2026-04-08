@@ -11,9 +11,9 @@ pinned: false
   <img src="https://raw.githubusercontent.com/sandeepsaha232-eng/SRC-SIMULATOR-META-HACKATHON/main/assets/hero.png" alt="SRE Fleet Gym Cyberpunk Dashboard" width="100%">
 </p>
 
-# 🚀 SRE Fleet Gym: A flight simulator for autonomous incident response agents
+# 🚀 SRE Fleet Gym: The Autonomous Incident Response Training Ground
 
-> An OpenEnv-compliant reinforcement-learning environment dedicated to solving the enterprise infrastructure crisis.
+**SRE Fleet Gym** is a high-fidelity "flight simulator" for AI agents, designed to train autonomous SREs (System Reliability Engineers) in diagnosing and remediating complex infrastructure failures. Built on the OpenEnv framework, it provides a rigorous, penalized sandbox where agents navigate real-world outage scenarios—from zombie processes to catastrophic cache stampedes—in a battle against downtime.
 
 ## 🌟 Live Interactive Demo
 [https://sandeep8327-src-simulator-hackathon.hf.space](https://sandeep8327-src-simulator-hackathon.hf.space)
@@ -22,13 +22,12 @@ pinned: false
 
 ---
 
-## 🛠️ Tech Stack
-This project leverages a modern, high-performance stack:
-* **Frontend**: React, TailwindCSS, Framer Motion, Recharts, Radix UI / Shadcn
-* **Backend Engine**: FastAPI, Uvicorn, Python 3.10+
-* **AI Integration**: Groq LLM API (Llama 3 / Mixtral for high-speed deterministic JSON parsing)
-* **Deployment**: Docker, Hugging Face Spaces (OpenEnv compliant)
-* **Styling**: Cyberpunk-inspired Glassmorphism UI
+## 🛠️ The Tech Stack
+*   **Engine:** FastAPI, Python 3.10+ (OpenEnv Compliant)
+*   **Simulation:** Pydantic-enforced state machines & deterministic anomaly generation
+*   **Frontend:** React, TailwindCSS, Framer Motion (Cyberpunk Glassmorphism UI)
+*   **Intelligence:** Groq LLM API (Llama 3 / Mixtral integration)
+*   **Infrastructure:** Docker, Hugging Face Spaces
 
 ---
 
@@ -94,34 +93,31 @@ We didn't just use a basic `0/1` reward. Instead, SRE Fleet Gym utilizes a conti
 
 ---
 
-## 🏗️ Local Setup & Testing
+## ⚡ Quick Start: Run It Locally
 
-### Baseline Deterministic Scores
-Our validation script currently scores:
-| Task            | Score | Steps |
-|-----------------|-------|-------|
-| single_machine  | 1.00  | 1     |
-| multi_machine   | 1.00  | 5     |
-| cascade_failure | 0.74  | 25    |
-| **Total**       | **2.74 / 3.0** | |
-
-**Via Docker (Same as Hugging Face deployment):**
+### 1. Using Docker (Recommended)
+The fastest way to get the full environment (including the dashboard) running exactly as it does on Hugging Face:
 ```bash
 docker build -t sre-fleet-gym .
 docker run -p 7860:7860 sre-fleet-gym
 ```
+Access the dashboard at: `http://localhost:7860`
 
-**Via Python Environment:**
+### 2. Manual Installation
+If you prefer running without Docker:
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the live dashboard server
-uvicorn app:app --reload --port 7860
+# Start the simulator & dashboard
+uvicorn app:app --port 7860 --reload
 
-# Run the autonomous observer (heuristic deterministic tests)
+# In a new terminal, run the agent (Heuristic/Deterministic)
 python inference.py
 
-# Run the autonomous observer with Groq LLM reasoning!
-API_KEY=gsk_xxx API_BASE_URL=https://api.groq.com/openai/v1 python inference.py
+# OR: Run with LLM Intelligence (Requires API Key)
+export HF_TOKEN="your_key"
+export API_BASE_URL="https://api.groq.com/openai/v1"
+export MODEL_NAME="llama3-70b-8192"
+python inference.py
 ```
