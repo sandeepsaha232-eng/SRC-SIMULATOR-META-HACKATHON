@@ -1,7 +1,8 @@
 """
 graders.py — Task graders for the SRE Fleet Gym.
 
-Each grader receives an EpisodeRecord and returns a float score in [0.0, 1.0].
+Each grader receives an EpisodeRecord and returns a float score in (0.0, 1.0).
+Scores are clamped to [0.01, 0.99] to satisfy the OpenEnv validator.
 """
 
 from __future__ import annotations
@@ -27,12 +28,12 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
     - Bonus: +0.1 for doing it in ≤ 3 steps
     - Penalty: -0.05 per extra step beyond 3
     """
-    score = 0.0
+    score = 0.01
     feedback = []
 
     initial_machine = episode.initial_fleet[0] if episode.initial_fleet else None
     if not initial_machine:
-        return {"score": 0.0, "feedback": ["No initial fleet found."]}
+        return {"score": 0.01, "feedback": ["No initial fleet found."]}
 
     # Find the anomaly PID
     anomaly_pids = [p.pid for p in initial_machine.processes if p.is_anomaly]
@@ -52,7 +53,7 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
             feedback.append("⚠️ Used reboot — brute force approach")
 
     if killed_correct:
-        score = 1.0
+        score = 0.99
     elif used_reboot:
         score = 0.5
     else:
@@ -64,19 +65,20 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
                 score = 0.7
                 feedback.append("Anomaly removed but method unclear")
             else:
-                score = 0.0
+                score = 0.01
                 feedback.append("❌ Anomaly still alive in final state")
 
     # Step bonus/penalty
     steps = episode.total_steps
     if steps <= 3 and score > 0:
-        score = min(1.0, score + 0.1)
+        score = min(0.99, score + 0.1)
         feedback.append(f"🏆 Efficient: solved in {steps} steps")
     elif steps > 5:
         penalty = 0.05 * (steps - 5)
-        score = max(0.0, score - penalty)
+        score = max(0.01, score - penalty)
         feedback.append(f"⏱️ Took {steps} steps (penalty applied)")
 
+    score = max(0.01, min(0.99, score))
     return {"score": round(score, 4), "max_score": 1.0, "feedback": feedback}
 
 
@@ -89,7 +91,7 @@ def grade_multi_machine(episode: EpisodeRecord) -> Dict:
     feedback = []
 
     if not episode.final_fleet:
-        return {"score": 0.0, "feedback": ["No final fleet state"]}
+        return {"score": 0.01, "feedback": ["No final fleet state"]}
 
     total = len(episode.final_fleet)
     healthy = sum(1 for m in episode.final_fleet if m.status == MachineStatus.HEALTHY)
@@ -111,14 +113,15 @@ def grade_multi_machine(episode: EpisodeRecord) -> Dict:
 
     if wrong_kills > 0:
         penalty = 0.1 * wrong_kills
-        base_score = max(0.0, base_score - penalty)
+        base_score = max(0.01, base_score - penalty)
         feedback.append(f"⚠️ {wrong_kills} non-anomaly process(es) killed (penalty: -{penalty:.2f})")
 
     # Efficiency bonus
     if episode.total_steps <= 10 and base_score >= 0.8:
-        base_score = min(1.0, base_score + 0.05)
+        base_score = min(0.99, base_score + 0.05)
         feedback.append("🏆 Efficient resolution")
 
+    base_score = max(0.01, min(0.99, base_score))
     return {"score": round(base_score, 4), "max_score": 1.0, "feedback": feedback}
 
 
@@ -134,7 +137,7 @@ def grade_cascade_failure(episode: EpisodeRecord) -> Dict:
     feedback = []
 
     if not episode.final_fleet:
-        return {"score": 0.0, "feedback": ["No final fleet state"]}
+        return {"score": 0.01, "feedback": ["No final fleet state"]}
 
     total = len(episode.final_fleet)
     healthy = sum(1 for m in episode.final_fleet if m.status == MachineStatus.HEALTHY)
@@ -192,7 +195,7 @@ def grade_cascade_failure(episode: EpisodeRecord) -> Dict:
         feedback.append(f"⚠️ {wrong_kills} wrong kill(s) (penalty: -{wrong_kill_penalty:.2f})")
 
     final_score = healing_score + order_bonus + speed_bonus - wrong_kill_penalty
-    final_score = max(0.0, min(1.0, final_score))
+    final_score = max(0.01, min(0.99, final_score))
 
     return {"score": round(final_score, 4), "max_score": 1.0, "feedback": feedback}
 
@@ -210,7 +213,7 @@ def grade_episode(episode: EpisodeRecord) -> Dict:
     """Grade an episode using the appropriate task grader."""
     grader_fn = GRADERS.get(episode.task_name)
     if not grader_fn:
-        return {"score": 0.0, "feedback": [f"No grader for task: {episode.task_name}"]}
+        return {"score": 0.01, "feedback": [f"No grader for task: {episode.task_name}"]}
     result = grader_fn(episode)
     result["task_name"] = episode.task_name
     result["total_steps"] = episode.total_steps

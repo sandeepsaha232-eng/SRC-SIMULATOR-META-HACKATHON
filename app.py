@@ -154,7 +154,7 @@ def run_baseline():
         # Ensure we return valid schema even on error
         return BaselineResponse(
             results=[],
-            total=0.0,
+            total=0.03,
             max=3.0
         )
 
