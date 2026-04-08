@@ -15,7 +15,7 @@ BASE_URL = os.environ.get("OPENENV_BASE_URL", "http://localhost:7860")
 # 🚨 Strictly using the exact variable names requested by the grader specs
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 MAX_STEPS = 25
 
 
@@ -122,13 +122,14 @@ Return ONLY valid JSON with these exact keys:
 def run_task(task_name: str, client=None) -> dict:
     with httpx.Client(base_url=BASE_URL, timeout=30.0) as http:
         action_log = []
+        rewards_log = [] # Added to track rewards for the [END] log
 
         resp = http.post("/reset", json={"task_name": task_name})
         resp.raise_for_status()
         obs = resp.json()
 
-        # 🚨 STRICT GRADER FORMAT: ONLY print the requested tags
-        print("[START]")
+        # 🚨 STRICT GRADER FORMAT: [START]
+        print(f"[START] task={task_name} env=sre_fleet_gym model={MODEL_NAME}", flush=True)
         
         steps = 0
         while not obs.get("done", False) and steps < MAX_STEPS:
@@ -140,39 +141,43 @@ def run_task(task_name: str, client=None) -> dict:
             except Exception:
                 action = heuristic_action(obs, task_name)
 
+            # Dashboard logging
             target_str = action.get('target', 'None')
-            command_str = {
-                "kill_pid": f"Killed PID {target_str}",
-                "restart_service": f"Restarted service: {target_str}",
-                "reboot": "Rebooted machine"
-            }.get(action['command'], f"{action['command']} on {target_str}")
-            
+            command_str = action['command']
             reasoning = action.get("reasoning", "Targeted anomalous process.")
-            if action['command'] == "noop":
-                command_str = "No action required"
-
             action_log.append({
                 "machine": action["machine_id"],
-                "command": command_str,
+                "command": f"{command_str} on {target_str}",
                 "reasoning": reasoning
             })
 
-            # 🚨 STRICT GRADER FORMAT: Must be a valid JSON string
-            print(f"[STEP] {json.dumps(action)}")
-
+            # Execute Step
             resp = http.post("/step", json=action)
             resp.raise_for_status()
             obs = resp.json()
             steps += 1
+            
+            reward = obs.get("reward", 0.0)
+            done = obs.get("done", False)
+            rewards_log.append(reward)
 
+            # 🚨 STRICT GRADER FORMAT: [STEP]
+            # Compress action dict to a string without spaces to avoid regex issues
+            action_str = json.dumps(action).replace(" ", "")
+            done_str = str(done).lower()
+            print(f"[STEP] step={steps} action={action_str} reward={reward:.2f} done={done_str} error=null", flush=True)
+
+        # Grade
         resp = http.post("/grader")
         resp.raise_for_status()
         grader = resp.json()
 
         score = grader.get("score", 0.0)
+        success_str = str(score > 0.0).lower() # Assuming any positive score is partial success
+        rewards_str = ",".join(f"{r:.2f}" for r in rewards_log) if rewards_log else "0.00"
         
-        # 🚨 STRICT GRADER FORMAT
-        print(f"[END] Episode finished with score: {score}")
+        # 🚨 STRICT GRADER FORMAT: [END]
+        print(f"[END] success={success_str} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
         return {
             "task": task_name,
