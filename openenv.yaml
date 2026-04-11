@@ -1,97 +1,146 @@
 name: sre-fleet-gym
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  A reinforcement-learning environment simulating SRE incident management.
-  An AI agent must diagnose and fix broken machine fleets of increasing complexity.
+  A reinforcement-learning environment simulating real-world SRE incident management.
+  An AI agent must diagnose and fix broken Linux server fleets of increasing complexity —
+  from clearing a full disk to tracing a cascading database deadlock across 20 machines.
 tags:
   - openenv
   - sre
   - infrastructure
   - incident-management
+  - linux-ops
 
 tasks:
   - name: single_machine
-    description: "1 machine, 1 zombie process. Kill the correct PID."
+    description: >
+      Clear a full disk. A log_rotator process is filling /var/log on a single server.
+      The agent must read the syslogs, identify the offending PID, and either kill it
+      or run clear_disk to free space.
     difficulty: easy
     max_steps: 30
     score_range: [0.0, 1.0]
 
   - name: multi_machine
-    description: "5 machines with mixed CPU spikes and memory pressure. Restore fleet health."
+    description: >
+      Memory leak in a service fleet. 5 machines with mixed CPU spikes, zombie processes,
+      memory exhaustion, and a crypto miner. The agent must triage each machine, identify
+      anomalous processes from noisy syslog output, and restore fleet health.
     difficulty: medium
     max_steps: 30
     score_range: [0.0, 1.0]
 
   - name: cascade_failure
-    description: "20 machines with dependency chains. Fix in dependency order."
+    description: >
+      Cascading database deadlock. 20 machines across 5 infrastructure tiers (DB → Cache →
+      App → Edge → Monitoring). A deadlocked PostgreSQL query on db-01 is causing cache
+      timeouts, app server 502s, and edge health check failures. The agent must trace the
+      root cause through hundreds of log lines and fix machines in dependency order.
+      WARNING: Blindly restarting a cache before fixing the database triggers a catastrophic
+      cache stampede trap.
     difficulty: hard
     max_steps: 30
     score_range: [0.0, 1.0]
 
 observation_space:
   type: object
+  description: >
+    Realistic fleet telemetry combining structured metrics and unstructured Linux syslog output.
+    Agents must parse multi-line journalctl-style log blocks alongside numerical CPU/memory data.
   properties:
     fleet:
       type: array
-      description: "List of machines with their current health state"
+      description: "List of machines with their current health state and raw syslog output"
       items:
         type: object
         properties:
-          id:           { type: string }
-          hostname:     { type: string }
+          id:           { type: string, description: "Machine identifier (e.g. db-01, app-03)" }
+          hostname:     { type: string, description: "Linux hostname (e.g. prod-db-01)" }
           status:       { type: string, enum: [healthy, degraded, critical] }
           mem_used:     { type: number, description: "Memory used %" }
           disk_pct:     { type: number, description: "Disk usage %" }
-          syslog_tail:  { type: string, description: "Last line of the system log" }
-          dependencies: { type: array, items: { type: string } }
+          drained:      { type: boolean, description: "Whether this node has been cordoned/isolated" }
+          syslog_tail:
+            type: string
+            description: >
+              Multi-line raw Linux syslog output (3-8 lines). Contains realistic journalctl/dmesg
+              entries with timestamps, facility codes, kernel warnings, and noise (cron, ssh, audit).
+              Anomaly-specific lines are mixed with noise — the agent must filter signal from noise.
+              Example: "Apr 11 03:14:07 prod-web-01 kernel: [42069.123] VFS: No space left on device"
+          dependencies: { type: array, items: { type: string }, description: "IDs of upstream machines" }
           processes:
             type: array
             items:
               type: object
               properties:
                 pid:        { type: integer }
-                name:       { type: string }
+                name:       { type: string, description: "Process name (e.g. nginx, log_rotator, xmrig)" }
                 cpu_pct:    { type: number }
                 mem_pct:    { type: number }
                 state:      { type: string, enum: [running, zombie, dead] }
                 is_anomaly: { type: boolean }
     dependencies:
       type: object
-      description: "Map of machine_id to list of dependency machine_ids"
+      description: "Dependency graph: machine_id → list of upstream machine_ids it depends on"
     step_count: { type: integer }
     done:       { type: boolean }
     reward:     { type: number, minimum: 0.0, maximum: 1.0 }
     info:
       type: object
       additionalProperties: true
-      description: "Extra episode metrics (healthy_count, total_count, success)"
+      description: "Milestone tracker, healthy_count, total_count, and success flag"
 
 action_space:
   type: object
+  description: >
+    Realistic SRE command set modeled after actual Linux terminal operations.
+    Actions map to real bash commands the agent would execute in a production environment.
   required: [machine_id, command]
   properties:
     machine_id:
       type: string
-      description: "Target machine ID (e.g. m-001, db-01, cache-02)"
+      description: "Target machine ID (e.g. m-001, db-01, cache-02, app-03)"
     command:
       type: string
-      enum: [kill_pid, restart_service, reboot, noop]
+      enum: [kill_pid, restart_service, reboot, noop, check_logs, drain_node, clear_disk]
+      description: >
+        kill_pid      → kill -9 <PID>
+        restart_service → systemctl restart <service>
+        reboot        → shutdown -r now (heavy downtime penalty)
+        check_logs    → journalctl -u <service> --no-pager -n 50 (diagnostic, triggers log_read milestone)
+        drain_node    → kubectl cordon <node> (isolates from dependency graph, prevents cascade)
+        clear_disk    → find /var/log -name '*.gz' -delete && truncate -s 0 /var/log/syslog
+        noop          → wait and observe
     target:
       type: string
       nullable: true
-      description: "PID for kill_pid, service name for restart_service"
+      description: "PID for kill_pid, service name for restart_service, null for others"
 
 reward:
   description: >
-    Shaped reward based on fleet health ratio minus step penalty.
-    Partial credit given at every step, not just episode end.
+    Milestone-based shaped reward with partial progress signals at every step.
+    NOT a binary 0/1 — the reward has 5+ distinct breakpoints across an episode.
   min: 0.0
   max: 1.0
-  signals:
-    - healthy_ratio: "% of machines in healthy status"
-    - step_penalty: "-0.01 per step to encourage efficiency"
-    - order_bonus: "cascade task rewards fixing dependencies first"
-    - wrong_kill_penalty: "-0.05 per non-anomaly process killed"
+  milestones:
+    - name: log_read
+      weight: 0.10
+      description: "Agent inspected the machine's syslog output (via check_logs or targeting the machine)"
+    - name: pid_identified
+      weight: 0.25
+      description: "Agent targeted the correct anomaly PID with kill_pid"
+    - name: node_isolated
+      weight: 0.15
+      description: "Agent drained/isolated a broken node to prevent cascade propagation"
+    - name: service_restored
+      weight: 0.25
+      description: "Machine transitioned to HEALTHY status"
+  penalties:
+    - step_penalty: "-0.005 per step to encourage efficiency"
+    - wrong_kill_penalty: "-0.15 per non-anomaly process killed"
+    - reboot_penalty: "-0.10 per brute-force reboot"
+    - cache_stampede_trap: "-0.20 for restarting cache before fixing upstream database"
+    - slo_burn_rate: "Weighted penalty per step for broken infrastructure (db=-0.04, cache=-0.02, app=-0.01)"
 
 endpoints:
   reset:    { method: POST, path: /reset,    description: "Spawn fresh broken fleet" }
@@ -107,10 +156,10 @@ baseline:
   api_client: openai
   fallback: heuristic
   scores:
-    single_machine:  1.0
-    multi_machine:   1.0
-    cascade_failure: 0.74
-    total: 2.74
+    single_machine:  0.96
+    multi_machine:   0.95
+    cascade_failure: 0.79
+    total: 2.70
     max:   3.0
 
 docker:

@@ -1,6 +1,6 @@
 """
 inference.py — Baseline inference script for SRE Fleet Gym.
-Grader-Compliant Version.
+Grader-Compliant Version with milestone-aware heuristic.
 """
 
 from __future__ import annotations
@@ -21,51 +21,129 @@ MAX_STEPS = 25
 
 # ── Heuristic Agent (fallback, no LLM needed) ───────────────────────────────
 
-def heuristic_action(obs: dict, task_name: str) -> dict:
+def heuristic_action(obs: dict, task_name: str, step: int = 0) -> dict:
+    """
+    Smart heuristic agent that uses realistic SRE commands.
+    
+    Strategy:
+    - Task 1 (single_machine): CHECK_LOGS → CLEAR_DISK or KILL_PID the log_rotator
+    - Task 2 (multi_machine): Iterate machines, KILL_PID each anomaly
+    - Task 3 (cascade_failure): Fix in tier order (db → cache → app → edge)
+    """
     fleet = obs.get("fleet", [])
     dependencies = obs.get("dependencies", {})
-    tier_order = {"db": 0, "cache": 1, "app": 2, "edge": 3, "mon": 4}
+    tier_order = {"db": 0, "cache": 1, "app": 2, "edge": 3, "mon": 4, "m": 5}
 
+    # ── Task 1: Disk-full scenario ───────────────────────────────────
+    if task_name == "single_machine":
+        machine = fleet[0] if fleet else None
+        if not machine:
+            return _noop(fleet)
+
+        # Step 0: Check logs first (triggers log_read milestone)
+        if step == 0:
+            return {
+                "machine_id": machine["id"],
+                "command": "check_logs",
+                "target": None,
+                "reasoning": "Inspecting system logs to diagnose the disk-full alert on prod-web-01."
+            }
+
+        # Step 1: Check if disk is full → clear_disk or kill the filler
+        if machine.get("disk_pct", 0) > 75.0:
+            # Look for the disk-filling process first
+            for proc in machine.get("processes", []):
+                if proc.get("is_anomaly") and proc.get("name") in ("log_rotator", "disk_filler"):
+                    return {
+                        "machine_id": machine["id"],
+                        "command": "kill_pid",
+                        "target": str(proc["pid"]),
+                        "reasoning": f"Identified disk-filling process {proc['name']} (PID {proc['pid']}). "
+                                     f"Killing to stop /var/log growth. Disk at {machine.get('disk_pct', 0):.0f}%."
+                    }
+            # Fallback: use clear_disk command
+            return {
+                "machine_id": machine["id"],
+                "command": "clear_disk",
+                "target": None,
+                "reasoning": f"Disk at {machine.get('disk_pct', 0):.0f}%. Running: find /var/log -name '*.gz' -delete && truncate -s 0 /var/log/syslog"
+            }
+
+        # Otherwise kill any remaining anomaly
+        for proc in machine.get("processes", []):
+            if proc.get("is_anomaly"):
+                return {
+                    "machine_id": machine["id"],
+                    "command": "kill_pid",
+                    "target": str(proc["pid"]),
+                    "reasoning": f"Killing anomalous process PID {proc['pid']} ({proc.get('name', 'unknown')})."
+                }
+
+        return _noop(fleet)
+
+    # ── Task 3: Cascade failure — fix in tier order ──────────────────
     if task_name == "cascade_failure":
         fleet = sorted(
             fleet,
             key=lambda m: tier_order.get(m["id"].split("-")[0], 5)
         )
 
+    # ── General strategy for multi_machine and cascade_failure ───────
     for machine in fleet:
         if machine["status"] in ("critical", "degraded"):
+            # Priority 1: Kill anomaly-flagged processes (these are the root causes)
             for proc in machine["processes"]:
                 if proc.get("is_anomaly"):
+                    # Handle disk-filler specifically
+                    if proc.get("name") in ("log_rotator", "disk_filler") and machine.get("disk_pct", 0) > 75.0:
+                        return {
+                            "machine_id": machine["id"],
+                            "command": "clear_disk",
+                            "target": None,
+                            "reasoning": f"Disk at {machine.get('disk_pct', 0):.0f}% on {machine['id']}. "
+                                         f"Clearing logs and killing {proc['name']} (PID {proc['pid']})."
+                        }
                     return {
                         "machine_id": machine["id"],
                         "command": "kill_pid",
                         "target": str(proc["pid"]),
-                        "reasoning": f"Anomaly flag detected on process {proc['pid']}."
+                        "reasoning": f"Anomaly detected: {proc.get('name', 'unknown')} (PID {proc['pid']}) on {machine['id']}. "
+                                     f"CPU: {proc.get('cpu_pct', 0):.1f}%, Mem: {proc.get('mem_pct', 0):.1f}%. Executing kill -9 {proc['pid']}."
                     }
-                if proc.get("cpu_pct", 0) > 80.0:
-                    return {
-                        "machine_id": machine["id"],
-                        "command": "kill_pid",
-                        "target": str(proc["pid"]),
-                        "reasoning": f"High CPU usage ({proc['cpu_pct']}%) detected on process {proc['pid']}."
-                    }
+
+            # Priority 2: Kill zombie/defunct processes (always bad)
+            for proc in machine["processes"]:
                 if proc.get("state") in ["zombie", "defunct"]:
                     return {
                         "machine_id": machine["id"],
                         "command": "kill_pid",
                         "target": str(proc["pid"]),
-                        "reasoning": f"Zombie/defunct process state detected on PID {proc['pid']}."
+                        "reasoning": f"Zombie/defunct process state detected on PID {proc['pid']} ({proc.get('name', 'unknown')}) — {machine['id']}."
                     }
             
-            if machine["processes"]:
-                highest_cpu_proc = max(machine["processes"], key=lambda p: p.get("cpu_pct", 0))
+            # Priority 3: Clear disk if critically full
+            if machine.get("disk_pct", 0) > 80.0:
                 return {
                     "machine_id": machine["id"],
-                    "command": "kill_pid",
-                    "target": str(highest_cpu_proc["pid"]),
-                    "reasoning": f"Emergency triage: Killing highest CPU process (PID {highest_cpu_proc['pid']}) on critical node."
+                    "command": "clear_disk",
+                    "target": None,
+                    "reasoning": f"Disk at {machine.get('disk_pct', 0):.0f}% on {machine['id']}. Clearing old logs."
                 }
 
+            # Priority 4: If machine is critical but has no anomalies, it's cascade pressure.
+            # DON'T kill healthy processes — the CPU will drop once upstream deps are fixed.
+            # Just skip this machine (noop is implicit by continuing the loop).
+            has_any_anomaly = any(p.get("is_anomaly") for p in machine["processes"])
+            if not has_any_anomaly:
+                # This machine is suffering from cascade pressure, not a local fault.
+                # It will self-heal once we fix the upstream dependency.
+                continue
+
+    return _noop(fleet)
+
+
+def _noop(fleet: list) -> dict:
+    """Return a noop action."""
     return {
         "machine_id": fleet[0]["id"] if fleet else "m-001",
         "command": "noop",
@@ -83,12 +161,16 @@ def llm_action(obs: dict, task_name: str, client) -> dict:
             anomalies = [p for p in m["processes"] if p.get("is_anomaly")]
             fleet_summary.append({
                 "id": m["id"],
+                "hostname": m.get("hostname", ""),
                 "status": m["status"],
+                "disk_pct": m.get("disk_pct", 0),
+                "mem_used": m.get("mem_used", 0),
+                "syslog_tail": m.get("syslog_tail", "")[:500],  # Truncate long syslogs
                 "anomaly_processes": anomalies,
                 "dependencies": m.get("dependencies", []),
             })
 
-    prompt = f"""You are an SRE agent managing a fleet of machines.
+    prompt = f"""You are an expert SRE agent managing a Linux fleet during a live outage.
 Task: {task_name}
 Step: {obs['step_count']}
 
@@ -98,14 +180,29 @@ Unhealthy machines:
 Dependency map:
 {json.dumps(obs.get('dependencies', {}), indent=2)}
 
+Available commands (like real Linux):
+- kill_pid: Execute `kill -9 <PID>` to terminate a specific process
+- restart_service: Execute `systemctl restart <service>` to restart a service
+- reboot: Execute `shutdown -r now` — nuclear option, heavy downtime penalty  
+- check_logs: Execute `journalctl -u <service> --no-pager -n 50` to inspect logs
+- drain_node: Execute `kubectl cordon <node>` to isolate from dependency graph
+- clear_disk: Execute `find /var/log -name '*.gz' -delete && truncate -s 0 /var/log/syslog`
+- noop: Wait and observe
+
+Strategy tips:
+- Fix root causes first (databases before caches before apps)
+- Use check_logs to gather more intel before acting
+- Kill specific PIDs instead of rebooting (reboot = penalty)
+- drain_node prevents cascade propagation from a broken machine
+
 Return ONLY valid JSON with these exact keys:
-{{"machine_id": "string", "command": "kill_pid|restart_service|reboot|noop", "target": "pid_or_service_name_or_null", "reasoning": "short explanation of reasoning"}}"""
+{{"machine_id": "string", "command": "kill_pid|restart_service|reboot|noop|check_logs|drain_node|clear_disk", "target": "pid_or_service_name_or_null", "reasoning": "short explanation"}}"""
 
     response = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.0,
-        max_tokens=150,
+        max_tokens=200,
         response_format={"type": "json_object"}
     )
 
@@ -137,9 +234,9 @@ def run_task(task_name: str, client=None) -> dict:
                 if client and HF_TOKEN:
                     action = llm_action(obs, task_name, client)
                 else:
-                    action = heuristic_action(obs, task_name)
+                    action = heuristic_action(obs, task_name, step=steps)
             except Exception:
-                action = heuristic_action(obs, task_name)
+                action = heuristic_action(obs, task_name, step=steps)
 
             # Dashboard logging
             target_str = action.get('target', 'None')
