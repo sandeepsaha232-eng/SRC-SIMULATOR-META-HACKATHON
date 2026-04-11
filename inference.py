@@ -278,8 +278,10 @@ Return ONLY valid JSON with these exact keys:
 
 # ── Episode Runner ───────────────────────────────────────────────────────────
 
+TIMEOUT_SECONDS = 120.0
+
 def run_task(task_name: str, client=None) -> dict:
-    with httpx.Client(base_url=BASE_URL, timeout=3600.0) as http:
+    with httpx.Client(base_url=BASE_URL, timeout=TIMEOUT_SECONDS) as http:
         action_log = []
         rewards_log = []
 
@@ -388,7 +390,74 @@ def run_all_tasks() -> dict:
     }
 
 
+import time
+import sys
+
+def run_agent_loop(task_name, difficulty):
+    """
+    The core Reinforcement Learning loop for the baseline agent.
+    """
+    print(f"\n[SYSTEM] Initializing Environment: {task_name} ({difficulty})")
+    print(f"[SYSTEM] Request Timeout locked at {TIMEOUT_SECONDS}s.")
+    time.sleep(1)
+
+    print(f"\n[ALERT] {difficulty} Incident Detected. Handing over to AI Agent...\n")
+
+    client = None
+    if HF_TOKEN:
+        try:
+            from openai import OpenAI
+            client = OpenAI(
+                api_key=HF_TOKEN,
+                base_url=API_BASE_URL
+            )
+        except Exception:
+            client = None
+
+    result = run_task(task_name, client)
+    print(f"\n[✔] Mission Concluded. Final Score: {result.get('score', 0.0)}")
+
+
+def main():
+    """
+    Interactive Mission Control Menu
+    """
+    os.system('clear' if os.name == 'posix' else 'cls')
+    print("==================================================")
+    print("     SRE FLEET GYM - MISSION CONTROL TERMINAL     ")
+    print("==================================================")
+    print("Select an incident to dispatch the Baseline Agent:\n")
+    print("  [1] Single Machine Failure  (Difficulty: Easy)")
+    print("      Description: Clear a 99% full disk on a worker node.")
+    print("  [2] Multi-Machine Anomaly   (Difficulty: Medium)")
+    print("      Description: Track down a memory leak across 3 web servers.")
+    print("  [3] Cascade Failure         (Difficulty: Hard)")
+    print("      Description: Global database deadlock crashing the entire fleet.")
+    print("  [0] Exit Simulator")
+    print("==================================================")
+
+    while True:
+        try:
+            choice = input("\nCommander, select scenario (1/2/3/0): ").strip()
+            
+            if choice == '1':
+                run_agent_loop(task_name="single_machine", difficulty="Easy")
+                break
+            elif choice == '2':
+                run_agent_loop(task_name="multi_machine", difficulty="Medium")
+                break
+            elif choice == '3':
+                run_agent_loop(task_name="cascade_failure", difficulty="Hard")
+                break
+            elif choice == '0':
+                print("[SYSTEM] Shutting down simulator...")
+                sys.exit(0)
+            else:
+                print("[ERROR] Invalid input. Please select 1, 2, 3, or 0.")
+        except KeyboardInterrupt:
+            print("\n[SYSTEM] Emergency abort triggered. Exiting.")
+            sys.exit(0)
+
+
 if __name__ == "__main__":
-    output = run_all_tasks()
-    # The final JSON block is kept for your dashboard to read
-    print(json.dumps(output, indent=2))
+    main()
