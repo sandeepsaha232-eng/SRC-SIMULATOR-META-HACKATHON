@@ -279,7 +279,7 @@ Return ONLY valid JSON with these exact keys:
 # ── Episode Runner ───────────────────────────────────────────────────────────
 
 def run_task(task_name: str, client=None) -> dict:
-    with httpx.Client(base_url=BASE_URL, timeout=30.0) as http:
+    with httpx.Client(base_url=BASE_URL, timeout=3600.0) as http:
         action_log = []
         rewards_log = []
 
