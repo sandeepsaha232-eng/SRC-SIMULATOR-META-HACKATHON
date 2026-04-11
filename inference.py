@@ -1,6 +1,11 @@
 """
 inference.py — Baseline inference script for SRE Fleet Gym.
-Grader-Compliant Version with milestone-aware heuristic.
+Investigation-First Agent: No God Mode.
+
+The agent must investigate before it can fix anything.
+It uses run_top/check_logs to discover processes and syslogs,
+then infers anomalies from process names and resource usage patterns
+(is_anomaly is NEVER revealed by the environment).
 """
 
 from __future__ import annotations
@@ -18,128 +23,160 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 MAX_STEPS = 25
 
+# ── Suspicious process name patterns (heuristic anomaly detection) ───────────
 
-# ── Heuristic Agent (fallback, no LLM needed) ───────────────────────────────
+SUSPICIOUS_NAMES = {
+    "log_rotator", "disk_filler", "defunct_worker", "runaway_loop",
+    "leaky_app", ":(){ :|:& };:", "xmrig", "fork_bomb",
+    "postgres: deadlocked_query", "mem_leak", "crypto_miner",
+}
 
-def heuristic_action(obs: dict, task_name: str, step: int = 0) -> dict:
-    """
-    Smart heuristic agent that uses realistic SRE commands.
+def _is_suspicious(proc: dict) -> bool:
+    """Infer whether a process is anomalous from its name and resource usage.
+    This replaces the is_anomaly flag which is no longer exposed."""
+    name = proc.get("name", "")
+    cpu = proc.get("cpu_pct", 0)
+    mem = proc.get("mem_pct", 0)
+    state = proc.get("state", "")
+
+    # Known bad process names
+    if name in SUSPICIOUS_NAMES:
+        return True
+    # Extremely high CPU (>70%) with non-system names
+    if cpu > 70.0 and name not in ("systemd", "sshd", "nginx", "node_exporter"):
+        return True
+    # Extremely high memory (>60%) with non-system names
+    if mem > 60.0 and name not in ("systemd", "sshd", "nginx", "node_exporter"):
+        return True
+    # Zombie processes are always suspicious
+    if state == "zombie":
+        return True
+    return False
+
+
+# ── Investigation-First Heuristic Agent ──────────────────────────────────────
+
+class InvestigationAgent:
+    """Multi-turn agent that follows the SRE investigation loop:
     
-    Strategy:
-    - Task 1 (single_machine): CHECK_LOGS → CLEAR_DISK or KILL_PID the log_rotator
-    - Task 2 (multi_machine): Iterate machines, KILL_PID each anomaly
-    - Task 3 (cascade_failure): Fix in tier order (db → cache → app → edge)
+    Phase 1: Investigation (run_top on each broken machine)
+    Phase 2: Diagnosis (check_logs on machines with suspicious processes)
+    Phase 3: Remediation (kill suspicious PIDs, clear disk, etc.)
+    Phase 4: Verification (noop to confirm health)
     """
-    fleet = obs.get("fleet", [])
-    dependencies = obs.get("dependencies", {})
-    tier_order = {"db": 0, "cache": 1, "app": 2, "edge": 3, "mon": 4, "m": 5}
 
-    # ── Task 1: Disk-full scenario ───────────────────────────────────
-    if task_name == "single_machine":
-        machine = fleet[0] if fleet else None
-        if not machine:
-            return _noop(fleet)
+    def __init__(self, task_name: str):
+        self.task_name = task_name
+        self.investigated: set = set()   # Machines we've run_top on
+        self.logs_read: set = set()      # Machines we've checked logs on
+        self.remediated: set = set()     # Machines we've taken action on
+        self.known_processes: dict = {}  # machine_id -> list of process dicts
+        self.tier_order = {"db": 0, "cache": 1, "app": 2, "edge": 3, "mon": 4, "m": 5}
 
-        # Step 0: Check logs first (triggers log_read milestone)
-        if step == 0:
-            return {
-                "machine_id": machine["id"],
-                "command": "check_logs",
-                "target": None,
-                "reasoning": "Inspecting system logs to diagnose the disk-full alert on prod-web-01."
-            }
+    def _get_broken_machines(self, fleet: list) -> list:
+        """Get machines that need attention, sorted by tier for cascade."""
+        broken = [m for m in fleet if m["status"] in ("critical", "degraded")]
+        if self.task_name == "cascade_failure":
+            broken.sort(key=lambda m: self.tier_order.get(m["id"].split("-")[0], 5))
+        return broken
 
-        # Step 1: Check if disk is full → clear_disk or kill the filler
-        if machine.get("disk_pct", 0) > 75.0:
-            # Look for the disk-filling process first
-            for proc in machine.get("processes", []):
-                if proc.get("is_anomaly") and proc.get("name") in ("log_rotator", "disk_filler"):
-                    return {
-                        "machine_id": machine["id"],
-                        "command": "kill_pid",
-                        "target": str(proc["pid"]),
-                        "reasoning": f"Identified disk-filling process {proc['name']} (PID {proc['pid']}). "
-                                     f"Killing to stop /var/log growth. Disk at {machine.get('disk_pct', 0):.0f}%."
-                    }
-            # Fallback: use clear_disk command
-            return {
-                "machine_id": machine["id"],
-                "command": "clear_disk",
-                "target": None,
-                "reasoning": f"Disk at {machine.get('disk_pct', 0):.0f}%. Running: find /var/log -name '*.gz' -delete && truncate -s 0 /var/log/syslog"
-            }
+    def act(self, obs: dict, step: int) -> dict:
+        """Choose the next action based on investigation state.
+        
+        Uses an INTERLEAVED approach: for each broken machine in tier order,
+        complete the full investigate → diagnose → remediate cycle before
+        moving to the next machine. This is much more step-efficient than
+        doing all investigations first.
+        """
+        fleet = obs.get("fleet", [])
+        broken = self._get_broken_machines(fleet)
 
-        # Otherwise kill any remaining anomaly
-        for proc in machine.get("processes", []):
-            if proc.get("is_anomaly"):
+        # Store any revealed processes
+        for m in fleet:
+            if m.get("processes"):
+                self.known_processes[m["id"]] = m["processes"]
+
+        # ── Interleaved per-machine loop ─────────────────────────────────
+        for m in broken:
+            mid = m["id"]
+
+            # Step A: Investigate (run_top) if not done
+            if mid not in self.investigated:
+                self.investigated.add(mid)
                 return {
-                    "machine_id": machine["id"],
-                    "command": "kill_pid",
-                    "target": str(proc["pid"]),
-                    "reasoning": f"Killing anomalous process PID {proc['pid']} ({proc.get('name', 'unknown')})."
-                }
-
-        return _noop(fleet)
-
-    # ── Task 3: Cascade failure — fix in tier order ──────────────────
-    if task_name == "cascade_failure":
-        fleet = sorted(
-            fleet,
-            key=lambda m: tier_order.get(m["id"].split("-")[0], 5)
-        )
-
-    # ── General strategy for multi_machine and cascade_failure ───────
-    for machine in fleet:
-        if machine["status"] in ("critical", "degraded"):
-            # Priority 1: Kill anomaly-flagged processes (these are the root causes)
-            for proc in machine["processes"]:
-                if proc.get("is_anomaly"):
-                    # Handle disk-filler specifically
-                    if proc.get("name") in ("log_rotator", "disk_filler") and machine.get("disk_pct", 0) > 75.0:
-                        return {
-                            "machine_id": machine["id"],
-                            "command": "clear_disk",
-                            "target": None,
-                            "reasoning": f"Disk at {machine.get('disk_pct', 0):.0f}% on {machine['id']}. "
-                                         f"Clearing logs and killing {proc['name']} (PID {proc['pid']})."
-                        }
-                    return {
-                        "machine_id": machine["id"],
-                        "command": "kill_pid",
-                        "target": str(proc["pid"]),
-                        "reasoning": f"Anomaly detected: {proc.get('name', 'unknown')} (PID {proc['pid']}) on {machine['id']}. "
-                                     f"CPU: {proc.get('cpu_pct', 0):.1f}%, Mem: {proc.get('mem_pct', 0):.1f}%. Executing kill -9 {proc['pid']}."
-                    }
-
-            # Priority 2: Kill zombie/defunct processes (always bad)
-            for proc in machine["processes"]:
-                if proc.get("state") in ["zombie", "defunct"]:
-                    return {
-                        "machine_id": machine["id"],
-                        "command": "kill_pid",
-                        "target": str(proc["pid"]),
-                        "reasoning": f"Zombie/defunct process state detected on PID {proc['pid']} ({proc.get('name', 'unknown')}) — {machine['id']}."
-                    }
-            
-            # Priority 3: Clear disk if critically full
-            if machine.get("disk_pct", 0) > 80.0:
-                return {
-                    "machine_id": machine["id"],
-                    "command": "clear_disk",
+                    "machine_id": mid,
+                    "command": "run_top",
                     "target": None,
-                    "reasoning": f"Disk at {machine.get('disk_pct', 0):.0f}% on {machine['id']}. Clearing old logs."
+                    "reasoning": f"Investigating {m['hostname']} (status: {m['status']}). "
+                                 f"Running `top` to discover running processes."
                 }
 
-            # Priority 4: If machine is critical but has no anomalies, it's cascade pressure.
-            # DON'T kill healthy processes — the CPU will drop once upstream deps are fixed.
-            # Just skip this machine (noop is implicit by continuing the loop).
-            has_any_anomaly = any(p.get("is_anomaly") for p in machine["processes"])
-            if not has_any_anomaly:
-                # This machine is suffering from cascade pressure, not a local fault.
-                # It will self-heal once we fix the upstream dependency.
+            # Step B: Check logs if not done
+            if mid not in self.logs_read:
+                self.logs_read.add(mid)
+                return {
+                    "machine_id": mid,
+                    "command": "check_logs",
+                    "target": None,
+                    "reasoning": f"Reading syslogs on {m['hostname']} to diagnose root cause."
+                }
+
+            # Step C: Remediate if not done
+            if mid in self.remediated:
                 continue
 
-    return _noop(fleet)
+            procs = self.known_processes.get(mid, m.get("processes", []))
+
+            # Sub-priority 1: Kill suspicious processes
+            for proc in procs:
+                if _is_suspicious(proc):
+                    self.remediated.add(mid)
+
+                    # Disk-filler specific: use clear_disk
+                    if proc.get("name") in ("log_rotator", "disk_filler") and m.get("disk_pct", 0) > 75.0:
+                        return {
+                            "machine_id": mid,
+                            "command": "clear_disk",
+                            "target": None,
+                            "reasoning": f"Disk at {m.get('disk_pct', 0):.0f}% on {mid}. "
+                                         f"Clearing logs and killing {proc['name']} (PID {proc['pid']})."
+                        }
+
+                    return {
+                        "machine_id": mid,
+                        "command": "kill_pid",
+                        "target": str(proc["pid"]),
+                        "reasoning": f"Suspicious process: {proc.get('name', '?')} (PID {proc['pid']}) "
+                                     f"on {mid}. CPU: {proc.get('cpu_pct', 0):.1f}%, "
+                                     f"Mem: {proc.get('mem_pct', 0):.1f}%. Executing kill -9."
+                    }
+
+            # Sub-priority 2: High disk → clear_disk
+            if m.get("disk_pct", 0) > 80.0:
+                self.remediated.add(mid)
+                return {
+                    "machine_id": mid,
+                    "command": "clear_disk",
+                    "target": None,
+                    "reasoning": f"Disk at {m.get('disk_pct', 0):.0f}% on {mid}. Clearing old logs."
+                }
+
+            # Sub-priority 3: No local anomaly found → cascade pressure, skip
+            has_suspicious = any(_is_suspicious(p) for p in procs)
+            if not has_suspicious:
+                self.remediated.add(mid)  # Don't revisit
+                continue
+
+        # ── Phase 4: All broken machines handled → noop ────────────────
+        return _noop(fleet)
+
+
+def heuristic_action(obs: dict, task_name: str, step: int = 0, agent: InvestigationAgent = None) -> dict:
+    """Wrapper for backward compatibility. Uses InvestigationAgent."""
+    if agent:
+        return agent.act(obs, step)
+    # Fallback: shouldn't reach here in normal flow
+    return _noop(obs.get("fleet", []))
 
 
 def _noop(fleet: list) -> dict:
@@ -158,45 +195,70 @@ def llm_action(obs: dict, task_name: str, client) -> dict:
     fleet_summary = []
     for m in obs["fleet"]:
         if m["status"] != "healthy":
-            anomalies = [p for p in m["processes"] if p.get("is_anomaly")]
             fleet_summary.append({
                 "id": m["id"],
                 "hostname": m.get("hostname", ""),
                 "status": m["status"],
                 "disk_pct": m.get("disk_pct", 0),
                 "mem_used": m.get("mem_used", 0),
-                "syslog_tail": m.get("syslog_tail", "")[:500],  # Truncate long syslogs
-                "anomaly_processes": anomalies,
+                "processes": m.get("processes", []),
+                "syslog_tail": m.get("syslog_tail", "")[:500],
                 "dependencies": m.get("dependencies", []),
             })
 
+    # Include command_output from previous step
+    prev_output = obs.get("command_output", "")
+    alert = obs.get("alert", "")
+
+    alert_line = f"ALERT: {alert}" if alert else ""
+    prev_line = f"Previous command output:\n{prev_output}" if prev_output else ""
+    fleet_json = json.dumps(fleet_summary, indent=2)
+    deps_json = json.dumps(obs.get('dependencies', {}), indent=2)
+    step_count = obs['step_count']
+
+    json_example = '{"machine_id": "string", "command": "one_of_the_commands_above", "target": "pid_or_service_name_or_null", "reasoning": "short explanation"}'
+
     prompt = f"""You are an expert SRE agent managing a Linux fleet during a live outage.
 Task: {task_name}
-Step: {obs['step_count']}
+Step: {step_count}
+
+{alert_line}
+{prev_line}
 
 Unhealthy machines:
-{json.dumps(fleet_summary, indent=2)}
+{fleet_json}
 
 Dependency map:
-{json.dumps(obs.get('dependencies', {}), indent=2)}
+{deps_json}
+
+IMPORTANT: You have PARTIAL VISIBILITY. You cannot see process details until you run `run_top`.
+You cannot see syslogs until you run `check_logs`. The `is_anomaly` flag is NOT available.
+You must INFER anomalies from process names, CPU/memory patterns, and log content.
 
 Available commands (like real Linux):
-- kill_pid: Execute `kill -9 <PID>` to terminate a specific process
-- restart_service: Execute `systemctl restart <service>` to restart a service
-- reboot: Execute `shutdown -r now` — nuclear option, heavy downtime penalty  
-- check_logs: Execute `journalctl -u <service> --no-pager -n 50` to inspect logs
-- drain_node: Execute `kubectl cordon <node>` to isolate from dependency graph
-- clear_disk: Execute `find /var/log -name '*.gz' -delete && truncate -s 0 /var/log/syslog`
-- noop: Wait and observe
+- run_top:          Execute `top` to see running processes (REQUIRED before kill_pid)
+- run_df:           Execute `df -h` to check disk usage
+- run_free:         Execute `free -m` to check memory usage
+- docker_stats:     Execute `docker stats` to see container metrics
+- netstat:          Execute `netstat -tlnp` to see network connections
+- check_logs:       Execute `journalctl --no-pager -n 50` to inspect logs
+- kill_pid:         Execute `kill -9 <PID>` to terminate a specific process
+- restart_service:  Execute `systemctl restart <service>` to restart a service
+- reboot:           Execute `shutdown -r now` — nuclear option, heavy downtime penalty  
+- drain_node:       Execute `kubectl cordon <node>` to isolate from dependency graph
+- clear_disk:       Execute `find /var/log -name '*.gz' -delete` (MUST check_logs first!)
+- noop:             Wait and observe
 
-Strategy tips:
-- Fix root causes first (databases before caches before apps)
-- Use check_logs to gather more intel before acting
-- Kill specific PIDs instead of rebooting (reboot = penalty)
-- drain_node prevents cascade propagation from a broken machine
+TRAPS (will cause negative reward):
+- clear_disk without check_logs first -> blind deletion penalty (-0.25)
+- reboot without run_top first -> reckless reboot penalty (-0.20)
+- restart_service on cache before fixing upstream DB -> cache stampede (-0.20)
+- kill_pid on healthy process -> wrong kill penalty (-0.15)
+
+Strategy: INVESTIGATE FIRST, then diagnose, then fix.
 
 Return ONLY valid JSON with these exact keys:
-{{"machine_id": "string", "command": "kill_pid|restart_service|reboot|noop|check_logs|drain_node|clear_disk", "target": "pid_or_service_name_or_null", "reasoning": "short explanation"}}"""
+{json_example}"""
 
     response = client.chat.completions.create(
         model=MODEL_NAME,
@@ -219,7 +281,7 @@ Return ONLY valid JSON with these exact keys:
 def run_task(task_name: str, client=None) -> dict:
     with httpx.Client(base_url=BASE_URL, timeout=30.0) as http:
         action_log = []
-        rewards_log = [] # Added to track rewards for the [END] log
+        rewards_log = []
 
         resp = http.post("/reset", json={"task_name": task_name})
         resp.raise_for_status()
@@ -227,6 +289,9 @@ def run_task(task_name: str, client=None) -> dict:
 
         # 🚨 STRICT GRADER FORMAT: [START]
         print(f"[START] task={task_name} env=sre_fleet_gym model={MODEL_NAME}", flush=True)
+
+        # Create investigation agent for this episode
+        agent = InvestigationAgent(task_name)
         
         steps = 0
         while not obs.get("done", False) and steps < MAX_STEPS:
@@ -234,9 +299,9 @@ def run_task(task_name: str, client=None) -> dict:
                 if client and HF_TOKEN:
                     action = llm_action(obs, task_name, client)
                 else:
-                    action = heuristic_action(obs, task_name, step=steps)
+                    action = heuristic_action(obs, task_name, step=steps, agent=agent)
             except Exception:
-                action = heuristic_action(obs, task_name, step=steps)
+                action = heuristic_action(obs, task_name, step=steps, agent=agent)
 
             # Dashboard logging
             target_str = action.get('target', 'None')
@@ -258,8 +323,13 @@ def run_task(task_name: str, client=None) -> dict:
             done = obs.get("done", False)
             rewards_log.append(reward)
 
+            # Show command output for debugging
+            cmd_out = obs.get("command_output", "")
+            if cmd_out:
+                # Truncate for log line
+                cmd_out_short = cmd_out[:100].replace("\n", " | ")
+
             # 🚨 STRICT GRADER FORMAT: [STEP]
-            # Compress action dict to a string without spaces to avoid regex issues
             action_str = json.dumps(action).replace(" ", "")
             done_str = str(done).lower()
             print(f"[STEP] step={steps} action={action_str} reward={reward:.2f} done={done_str} error=null", flush=True)
@@ -270,7 +340,7 @@ def run_task(task_name: str, client=None) -> dict:
         grader = resp.json()
 
         score = grader.get("score", 0.0)
-        success_str = str(score > 0.0).lower() # Assuming any positive score is partial success
+        success_str = str(score > 0.0).lower()
         rewards_str = ",".join(f"{r:.2f}" for r in rewards_log) if rewards_log else "0.00"
         
         # 🚨 STRICT GRADER FORMAT: [END]

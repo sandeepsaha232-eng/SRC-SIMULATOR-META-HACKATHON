@@ -5,10 +5,11 @@ Each grader receives an EpisodeRecord and returns a float score in (0.0, 1.0).
 Scores are clamped to [0.01, 0.99] to satisfy the OpenEnv validator.
 
 Milestone-based scoring with partial progress signals:
-  - log_read:         Agent inspected the machine's logs          (+0.10)
-  - pid_identified:   Agent targeted the correct anomaly PID      (+0.25)
-  - node_isolated:    Agent drained/isolated the node (cascade)   (+0.15)
-  - service_restored: Machine reached HEALTHY status              (+0.25)
+  - investigated:     Agent ran run_top to discover processes      (+0.05)
+  - log_read:         Agent inspected the machine's logs           (+0.10)
+  - pid_identified:   Agent targeted the correct anomaly PID       (+0.25)
+  - node_isolated:    Agent drained/isolated the node (cascade)    (+0.15)
+  - service_restored: Machine reached HEALTHY status               (+0.25)
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from fleet_simulator import (
 # ── Milestone Scoring Weights ──────────────────────────────────────────────
 
 MILESTONE_WEIGHTS = {
+    "investigated": 0.05,
     "log_read": 0.10,
     "pid_identified": 0.25,
     "node_isolated": 0.15,
@@ -68,11 +70,12 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
     Easy grader: 1 machine, disk full from log_rotator.
     
     Milestone scoring:
+    - investigated:      Agent ran run_top to discover processes (+0.05)
     - log_read:          Agent inspected machine logs        (+0.15)
     - pid_identified:    Agent killed log_rotator or used clear_disk  (+0.30)
-    - service_restored:  Machine is HEALTHY                  (+0.40)
-    - Step bonus: +0.10 for ≤ 3 steps
-    - Step penalty: -0.05 per extra step beyond 5
+    - service_restored:  Machine is HEALTHY                  (+0.35)
+    - Step bonus: +0.10 for ≤ 5 steps (adjusted for investigation overhead)
+    - Step penalty: -0.05 per extra step beyond 8
     """
     score = 0.01
     feedback = []
@@ -83,6 +86,16 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
 
     # Find the anomaly PID
     anomaly_pids = [p.pid for p in initial_machine.processes if p.is_anomaly]
+
+    # ── Milestone: investigated ──────────────────────────────────────
+    investigated = False
+    if episode.milestones:
+        for mid, ms in episode.milestones.items():
+            if ms.get("investigated"):
+                investigated = True
+    if investigated:
+        score += 0.05
+        feedback.append("✅ Investigated machine with run_top (+0.05)")
 
     # ── Milestone: log_read ──────────────────────────────────────────
     log_read = False
@@ -122,21 +135,21 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
     if episode.final_fleet:
         final_machine = episode.final_fleet[0]
         if final_machine.status == MachineStatus.HEALTHY:
-            score += 0.40
-            feedback.append("✅ Machine restored to HEALTHY status (+0.40)")
+            score += 0.35
+            feedback.append("✅ Machine restored to HEALTHY status (+0.35)")
         elif final_machine.disk_pct < 75.0:
-            score += 0.20
-            feedback.append("⚠️ Disk pressure relieved but machine not fully healthy (+0.20)")
+            score += 0.15
+            feedback.append("⚠️ Disk pressure relieved but machine not fully healthy (+0.15)")
         else:
             feedback.append("❌ Machine still in degraded/critical state")
 
-    # ── Step bonus/penalty ───────────────────────────────────────────
+    # ── Step bonus/penalty (adjusted for multi-turn investigation) ───
     steps = episode.total_steps
-    if steps <= 3 and score > 0.20:
+    if steps <= 5 and score > 0.20:
         score = min(0.99, score + 0.10)
         feedback.append(f"🏆 Efficient: solved in {steps} steps (+0.10)")
-    elif steps > 5:
-        penalty = 0.05 * (steps - 5)
+    elif steps > 8:
+        penalty = 0.05 * (steps - 8)
         score = max(0.01, score - penalty)
         feedback.append(f"⏱️ Took {steps} steps (penalty: -{penalty:.2f})")
 
@@ -148,7 +161,7 @@ def grade_multi_machine(episode: EpisodeRecord) -> Dict:
     """
     Medium grader: 5 machines with mixed issues.
     
-    Per-machine milestone scoring, averaged across fleet:
+    Per-machine milestone scoring, averaged across fleet (includes investigation):
     - log_read:         +0.10 per machine
     - pid_identified:   +0.25 per machine
     - service_restored: +0.25 per machine

@@ -1,43 +1,48 @@
 name: sre-fleet-gym
-version: "2.0.0"
+version: "3.0.0"
 description: >
-  A reinforcement-learning environment simulating real-world SRE incident management.
-  An AI agent must diagnose and fix broken Linux server fleets of increasing complexity —
-  from clearing a full disk to tracing a cascading database deadlock across 20 machines.
+  A reinforcement-learning environment simulating real-world SRE incident management
+  with PARTIAL OBSERVABILITY. An AI agent receives only high-level alerts and must
+  investigate, diagnose, and fix broken Linux server fleets — from clearing a full
+  disk to tracing a cascading database deadlock across 20 machines.
+  No "God Mode" — the agent must earn its knowledge through investigation commands.
 tags:
   - openenv
   - sre
   - infrastructure
   - incident-management
   - linux-ops
+  - partial-observability
 
 tasks:
   - name: single_machine
     description: >
-      Clear a full disk. A log_rotator process is filling /var/log on a single server.
-      The agent must read the syslogs, identify the offending PID, and either kill it
-      or run clear_disk to free space.
+      Alert: Disk usage critical on prod-web-01. Write operations failing.
+      The agent must investigate (run_top, check_logs) to discover the cause,
+      identify the offending process, and restore the machine to healthy status.
+      WARNING: Using clear_disk before check_logs triggers a blind deletion penalty.
     difficulty: easy
     max_steps: 30
     score_range: [0.0, 1.0]
 
   - name: multi_machine
     description: >
-      Memory leak in a service fleet. 5 machines with mixed CPU spikes, zombie processes,
-      memory exhaustion, and a crypto miner. The agent must triage each machine, identify
-      anomalous processes from noisy syslog output, and restore fleet health.
+      Alert: API latency spiked to 5000ms. 5 machines reporting elevated error rates.
+      Root cause unknown. The agent must investigate each machine, diagnose mixed
+      CPU spikes, zombie processes, memory exhaustion, and a crypto miner from noisy
+      syslog output, then restore fleet health without killing healthy processes.
     difficulty: medium
     max_steps: 30
     score_range: [0.0, 1.0]
 
   - name: cascade_failure
     description: >
-      Cascading database deadlock. 20 machines across 5 infrastructure tiers (DB → Cache →
-      App → Edge → Monitoring). A deadlocked PostgreSQL query on db-01 is causing cache
-      timeouts, app server 502s, and edge health check failures. The agent must trace the
-      root cause through hundreds of log lines and fix machines in dependency order.
-      WARNING: Blindly restarting a cache before fixing the database triggers a catastrophic
-      cache stampede trap.
+      Alert: Cascading 502 errors across 20 machines in 5 infrastructure tiers
+      (DB → Cache → App → Edge → Monitoring). Root cause unknown. The agent must
+      trace the problem through the dependency chain using investigation commands.
+      WARNING: Blindly restarting a cache before fixing the upstream database triggers
+      a catastrophic cache stampede trap. Reckless reboots without investigation incur
+      heavy penalties.
     difficulty: hard
     max_steps: 30
     score_range: [0.0, 1.0]
@@ -45,12 +50,24 @@ tasks:
 observation_space:
   type: object
   description: >
-    Realistic fleet telemetry combining structured metrics and unstructured Linux syslog output.
-    Agents must parse multi-line journalctl-style log blocks alongside numerical CPU/memory data.
+    PARTIALLY OBSERVABLE fleet telemetry. On reset, the agent receives only an alert
+    message and high-level machine metrics (status, disk%, mem%). Process lists are
+    HIDDEN until the agent runs `run_top`. Syslogs are HIDDEN until `check_logs`.
+    The `is_anomaly` flag is NEVER revealed — the agent must infer anomalies from
+    process names, CPU/memory patterns, and syslog content.
   properties:
+    alert:
+      type: string
+      description: "Initial alert message describing the incident (only present on reset)"
+    command_output:
+      type: string
+      description: >
+        Terminal-style output from the last command executed. Contains simulated
+        output of top, df -h, free -m, journalctl, kill, etc. This is the primary
+        way the agent receives diagnostic information.
     fleet:
       type: array
-      description: "List of machines with their current health state and raw syslog output"
+      description: "List of machines — process details HIDDEN until investigated"
       items:
         type: object
         properties:
@@ -63,13 +80,16 @@ observation_space:
           syslog_tail:
             type: string
             description: >
-              Multi-line raw Linux syslog output (3-8 lines). Contains realistic journalctl/dmesg
-              entries with timestamps, facility codes, kernel warnings, and noise (cron, ssh, audit).
-              Anomaly-specific lines are mixed with noise — the agent must filter signal from noise.
-              Example: "Apr 11 03:14:07 prod-web-01 kernel: [42069.123] VFS: No space left on device"
+              HIDDEN by default — shows "[Run check_logs to inspect system logs]" until
+              the agent runs check_logs on this machine. After investigation, contains
+              multi-line raw Linux syslog with timestamps, kernel warnings, and noise.
           dependencies: { type: array, items: { type: string }, description: "IDs of upstream machines" }
           processes:
             type: array
+            description: >
+              HIDDEN by default — empty list until the agent runs `run_top` or
+              `docker_stats` on this machine. After investigation, shows process
+              list but with is_anomaly ALWAYS set to false.
             items:
               type: object
               properties:
@@ -78,10 +98,10 @@ observation_space:
                 cpu_pct:    { type: number }
                 mem_pct:    { type: number }
                 state:      { type: string, enum: [running, zombie, dead] }
-                is_anomaly: { type: boolean }
+                is_anomaly: { type: boolean, description: "ALWAYS false — agent must infer from context" }
     dependencies:
       type: object
-      description: "Dependency graph: machine_id → list of upstream machine_ids it depends on"
+      description: "Dependency graph: machine_id → list of upstream machine_ids"
     step_count: { type: integer }
     done:       { type: boolean }
     reward:     { type: number, minimum: 0.0, maximum: 1.0 }
@@ -94,7 +114,9 @@ action_space:
   type: object
   description: >
     Realistic SRE command set modeled after actual Linux terminal operations.
-    Actions map to real bash commands the agent would execute in a production environment.
+    Includes INVESTIGATION commands (run_top, check_logs, run_df, run_free) that
+    the agent must use before taking remediation actions. Actions taken without
+    prior investigation trigger trap penalties.
   required: [machine_id, command]
   properties:
     machine_id:
@@ -102,15 +124,27 @@ action_space:
       description: "Target machine ID (e.g. m-001, db-01, cache-02, app-03)"
     command:
       type: string
-      enum: [kill_pid, restart_service, reboot, noop, check_logs, drain_node, clear_disk]
+      enum: [kill_pid, restart_service, reboot, noop, check_logs, drain_node, clear_disk, run_top, run_df, run_free, docker_stats, netstat]
       description: >
-        kill_pid      → kill -9 <PID>
-        restart_service → systemctl restart <service>
-        reboot        → shutdown -r now (heavy downtime penalty)
-        check_logs    → journalctl -u <service> --no-pager -n 50 (diagnostic, triggers log_read milestone)
-        drain_node    → kubectl cordon <node> (isolates from dependency graph, prevents cascade)
-        clear_disk    → find /var/log -name '*.gz' -delete && truncate -s 0 /var/log/syslog
-        noop          → wait and observe
+        INVESTIGATION (use first):
+          run_top       → top (discover running processes — REQUIRED before kill_pid)
+          run_df        → df -h (check disk usage)
+          run_free      → free -m (check memory usage)
+          docker_stats  → docker stats --no-stream (container metrics)
+          netstat       → netstat -tlnp (network connections)
+          check_logs    → journalctl --no-pager -n 50 (inspect syslogs — REQUIRED before clear_disk)
+
+        REMEDIATION:
+          kill_pid      → kill -9 <PID>
+          restart_service → systemctl restart <service>
+          clear_disk    → find /var/log -name '*.gz' -delete (MUST check_logs first!)
+          drain_node    → kubectl cordon <node> (isolates from dependency graph)
+
+        DANGEROUS:
+          reboot        → shutdown -r now (heavy penalty, resets investigation progress)
+          
+        PASSIVE:
+          noop          → wait and observe
     target:
       type: string
       nullable: true
@@ -119,13 +153,17 @@ action_space:
 reward:
   description: >
     Milestone-based shaped reward with partial progress signals at every step.
-    NOT a binary 0/1 — the reward has 5+ distinct breakpoints across an episode.
+    NOT a binary 0/1 — the reward has 6+ distinct breakpoints across an episode.
+    Investigation commands earn partial rewards even before fixing anything.
   min: 0.0
   max: 1.0
   milestones:
+    - name: investigated
+      weight: 0.05
+      description: "Agent ran run_top to discover process list on a broken machine"
     - name: log_read
       weight: 0.10
-      description: "Agent inspected the machine's syslog output (via check_logs or targeting the machine)"
+      description: "Agent ran check_logs to inspect syslog output"
     - name: pid_identified
       weight: 0.25
       description: "Agent targeted the correct anomaly PID with kill_pid"
@@ -138,13 +176,15 @@ reward:
   penalties:
     - step_penalty: "-0.005 per step to encourage efficiency"
     - wrong_kill_penalty: "-0.15 per non-anomaly process killed"
-    - reboot_penalty: "-0.10 per brute-force reboot"
+    - blind_reboot_penalty: "-0.20 for rebooting without investigating first (resets investigation progress)"
+    - standard_reboot_penalty: "-0.10 for rebooting after investigation (still heavy)"
+    - blind_disk_clear_penalty: "-0.25 for clearing disk without checking logs first (evidence destroyed)"
     - cache_stampede_trap: "-0.20 for restarting cache before fixing upstream database"
     - slo_burn_rate: "Weighted penalty per step for broken infrastructure (db=-0.04, cache=-0.02, app=-0.01)"
 
 endpoints:
-  reset:    { method: POST, path: /reset,    description: "Spawn fresh broken fleet" }
-  step:     { method: POST, path: /step,     description: "Execute one action" }
+  reset:    { method: POST, path: /reset,    description: "Spawn fresh broken fleet (returns partial observation with alert)" }
+  step:     { method: POST, path: /step,     description: "Execute one action (returns partial observation with command_output)" }
   state:    { method: GET,  path: /state,    description: "Current fleet snapshot" }
   tasks:    { method: GET,  path: /tasks,    description: "List tasks + action schema" }
   grader:   { method: POST, path: /grader,   description: "Score completed episode" }
@@ -157,9 +197,9 @@ baseline:
   fallback: heuristic
   scores:
     single_machine:  0.96
-    multi_machine:   0.95
-    cascade_failure: 0.79
-    total: 2.70
+    multi_machine:   0.85
+    cascade_failure: 0.69
+    total: 2.50
     max:   3.0
 
 docker:

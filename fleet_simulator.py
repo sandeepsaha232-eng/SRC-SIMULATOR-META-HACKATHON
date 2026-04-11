@@ -38,6 +38,12 @@ class Command(str, Enum):
     CHECK_LOGS = "check_logs"
     DRAIN_NODE = "drain_node"
     CLEAR_DISK = "clear_disk"
+    # Investigation commands — agent must use these to discover what's broken
+    RUN_TOP = "run_top"            # → simulated `top` output
+    RUN_DF = "run_df"              # → simulated `df -h` output
+    RUN_FREE = "run_free"          # → simulated `free -m` output
+    DOCKER_STATS = "docker_stats"  # → simulated `docker stats`
+    NETSTAT = "netstat"            # → simulated `netstat -tlnp`
 
 
 # ── Pydantic Models ────────────────────────────────────────────────────────
@@ -78,6 +84,8 @@ class Observation(BaseModel):
     done: bool = Field(False, description="Whether episode is complete")
     reward: float = Field(0.0, description="Cumulative reward")
     info: Dict[str, Any] = Field(default_factory=dict, description="Extra info")
+    alert: str = Field("", description="Initial alert message (partial observability)")
+    command_output: str = Field("", description="Terminal output from last command")
 
 
 class TaskInfo(BaseModel):
@@ -102,41 +110,59 @@ class EpisodeRecord(BaseModel):
 
 # ── Fleet Simulator ────────────────────────────────────────────────────────
 
+# Alert-based initial observations (partial observability — agent must investigate)
+TASK_ALERTS: Dict[str, str] = {
+    "single_machine": (
+        "🚨 ALERT: Disk usage on prod-web-01 has exceeded 95%. "
+        "Write operations failing. Service degrading. Investigate and resolve."
+    ),
+    "multi_machine": (
+        "🚨 ALERT: API latency has spiked to 5000ms across the service fleet. "
+        "5 machines reporting elevated error rates. Root cause unknown."
+    ),
+    "cascade_failure": (
+        "🚨 ALERT: Cascading failures detected. Edge load balancers returning 502. "
+        "Multiple infrastructure tiers affected. Root cause unknown. Investigate immediately."
+    ),
+}
+
+_ALL_COMMANDS = "kill_pid | restart_service | reboot | noop | check_logs | drain_node | clear_disk | run_top | run_df | run_free | docker_stats | netstat"
+
 TASK_DEFINITIONS: Dict[str, TaskInfo] = {
     "single_machine": TaskInfo(
         name="single_machine",
-        description="Clear a full disk. A log_rotator process is filling /var/log on a single machine. "
-                    "Identify the offending PID from the syslogs, kill it or clear the disk.",
+        description="Alert: Disk usage critical on a production server. Investigate the cause, "
+                    "identify the offending process, and restore the machine to healthy status.",
         difficulty="easy",
         num_machines=1,
         action_schema={
             "machine_id": "string",
-            "command": "kill_pid | restart_service | reboot | noop | check_logs | drain_node | clear_disk",
+            "command": _ALL_COMMANDS,
             "target": "string (PID or service name)",
         },
     ),
     "multi_machine": TaskInfo(
         name="multi_machine",
-        description="Memory leak in a service fleet. 5 machines with mixed CPU spikes, zombie processes, "
-                    "and memory exhaustion. Triage and restore fleet health.",
+        description="Alert: API latency spiked across the fleet. 5 machines are degraded. "
+                    "Investigate each machine, diagnose the root cause, and restore fleet health.",
         difficulty="medium",
         num_machines=5,
         action_schema={
             "machine_id": "string",
-            "command": "kill_pid | restart_service | reboot | noop | check_logs | drain_node | clear_disk",
+            "command": _ALL_COMMANDS,
             "target": "string (PID or service name)",
         },
     ),
     "cascade_failure": TaskInfo(
         name="cascade_failure",
-        description="Cascading database deadlock. 20 machines across 5 tiers. A deadlocked query on db-01 "
-                    "is causing cache timeouts, app server 502s, and edge alerts. Trace the root cause "
-                    "through hundreds of log lines and fix in dependency order.",
+        description="Alert: Cascading 502 errors across 20 machines in 5 tiers. "
+                    "Trace the root cause through the dependency chain and fix in the correct order. "
+                    "WARNING: reckless actions can make things worse.",
         difficulty="hard",
         num_machines=20,
         action_schema={
             "machine_id": "string",
-            "command": "kill_pid | restart_service | reboot | noop | check_logs | drain_node | clear_disk",
+            "command": _ALL_COMMANDS,
             "target": "string (PID or service name)",
         },
     ),
@@ -278,7 +304,13 @@ def _make_baseline_machine(machine_id: str, hostname: str, deps: List[str] | Non
 
 
 class FleetSimulator:
-    """Simulates a fleet of machines with injected failures."""
+    """Simulates a fleet of machines with injected failures.
+    
+    Partial Observability: The agent does NOT see process details or syslogs
+    until it investigates with run_top/check_logs. The is_anomaly flag is
+    NEVER revealed — the agent must infer anomalies from process names,
+    CPU/memory usage patterns, and syslog content.
+    """
 
     def __init__(self):
         self._fleet: List[Machine] = []
@@ -291,6 +323,10 @@ class FleetSimulator:
         self._destructive_penalties: float = 0.0
         # Milestone tracker: machine_id -> {milestone_name: bool}
         self._milestones: Dict[str, Dict[str, bool]] = {}
+        # Partial observability: track what the agent has investigated
+        self._investigated_machines: set = set()   # Agent ran run_top on these
+        self._logs_read_machines: set = set()       # Agent ran check_logs on these
+        self._last_command_output: str = ""         # Terminal output from last command
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
@@ -370,7 +406,12 @@ class FleetSimulator:
     # ── Public API ──────────────────────────────────────────────────────
 
     def reset(self, task_name: str) -> Observation:
-        """Spawn a fresh broken fleet for the given task."""
+        """Spawn a fresh broken fleet for the given task.
+        
+        Returns a PARTIAL observation: the agent only sees an alert message,
+        machine IDs + high-level metrics. No process details, no syslogs.
+        The agent must investigate to discover what's broken.
+        """
         import random
         # Ensure fully reproducible deterministic baselines for OpenEnv validation
         random.seed(42)
@@ -383,6 +424,10 @@ class FleetSimulator:
         self._trap_penalties = 0.0
         self._destructive_penalties = 0.0
         self._done = False
+        # Reset investigation state for partial observability
+        self._investigated_machines = set()
+        self._logs_read_machines = set()
+        self._last_command_output = ""
 
         if task_name == "single_machine":
             self._fleet = self._spawn_single_machine()
@@ -399,26 +444,31 @@ class FleetSimulator:
             initial_fleet=deepcopy(self._fleet),
         )
 
-        obs = self._make_observation()
+        obs = self._make_partial_observation(is_reset=True)
         self._episode.observations.append(deepcopy(obs))
         return obs
 
     def step(self, action: Action) -> Observation:
-        """Execute an action, tick dynamics, return new observation."""
+        """Execute a single action, tick dynamics, return partial observation.
+        
+        The observation returned is PARTIAL — the agent only sees details
+        for machines it has investigated. command_output contains the
+        terminal-style output of the action (e.g., simulated `top` output).
+        """
         if self._done:
-            return self._make_observation()
+            return self._make_partial_observation()
 
         self._step_count += 1
+        self._last_command_output = ""  # Reset for this step
 
         # Record action
         if self._episode:
             self._episode.actions.append(deepcopy(action))
 
-        # Track milestone: log_read — agent targeted this machine
-        if action.machine_id in self._milestones:
-            self._milestones[action.machine_id]["log_read"] = True
+        # DON'T auto-set log_read just because the agent sent ANY action.
+        # Only set it when agent explicitly runs CHECK_LOGS.
 
-        # Execute the action
+        # Execute the action (sets self._last_command_output)
         self._execute_action(action)
 
         # Tick dynamics (drift, cascades, etc.)
@@ -432,7 +482,7 @@ class FleetSimulator:
         # Check completion
         self._check_done()
 
-        obs = self._make_observation()
+        obs = self._make_partial_observation()
 
         if self._episode:
             self._episode.observations.append(deepcopy(obs))
@@ -552,6 +602,7 @@ class FleetSimulator:
     def _execute_action(self, action: Action) -> None:
         machine = self._find_machine(action.machine_id)
         if machine is None:
+            self._last_command_output = f"ERROR: Machine '{action.machine_id}' not found."
             return
 
         if action.command == Command.KILL_PID:
@@ -569,7 +620,16 @@ class FleetSimulator:
                 # Penalty for killing non-anomaly processes
                 if not proc.is_anomaly:
                     self._destructive_penalties += 0.15
-                    print(f"PENALTY: Killed healthy process PID {target_pid} on {machine.id}")
+                    self._last_command_output = (
+                        f"kill -9 {target_pid}\n"
+                        f"⚠️  WARNING: Killed healthy process '{proc.name}' (PID {target_pid}). "
+                        f"Service disruption detected on {machine.hostname}."
+                    )
+                else:
+                    self._last_command_output = (
+                        f"kill -9 {target_pid}\n"
+                        f"Process '{proc.name}' (PID {target_pid}) terminated."
+                    )
 
                 # Explicitly free disk space if the anomaly is a disk filler
                 if proc.is_anomaly and proc.name in ("log_rotator", "disk_filler"):
@@ -578,6 +638,8 @@ class FleetSimulator:
                 proc.state = ProcessState.DEAD
                 machine.processes = [p for p in machine.processes if p.state != ProcessState.DEAD]
                 machine.mem_used = sum(p.mem_pct for p in machine.processes)
+            else:
+                self._last_command_output = f"kill -9 {target_pid}\nNo such process (PID {target_pid})."
 
         elif action.command == Command.RESTART_SERVICE:
             if "cache" in machine.id:
@@ -590,7 +652,11 @@ class FleetSimulator:
                             p.cpu_pct = 100.0
                         db_machine.status = MachineStatus.CRITICAL
                         self._trap_penalties += 0.2
-                        print(f"TRAP TRIGGERED: Cache stampede on {db_machine.id}!")
+                        self._last_command_output = (
+                            f"systemctl restart {action.target or 'redis'}\n"
+                            f"🚨 CRITICAL: Cache stampede triggered on {db_machine.id}! "
+                            f"Upstream database overwhelmed by thundering herd."
+                        )
                         
             svc_name = action.target or ""
             for p in machine.processes:
@@ -598,38 +664,82 @@ class FleetSimulator:
                     p.cpu_pct = max(1.0, p.cpu_pct * 0.1)
                     p.mem_pct = max(1.0, p.mem_pct * 0.2)
                     p.state = ProcessState.RUNNING
+            if not self._last_command_output:
+                self._last_command_output = (
+                    f"systemctl restart {svc_name or 'unknown'}\n"
+                    f"Service restarted on {machine.hostname}."
+                )
 
         elif action.command == Command.REBOOT:
-            # Reboot kills all anomalies but also restarts healthy services (downtime penalty)
+            # TRAP: Rebooting without investigating is reckless
+            if machine.id not in self._investigated_machines:
+                self._destructive_penalties += 0.20  # Increased penalty for blind reboot
+                self._last_command_output = (
+                    f"shutdown -r now\n"
+                    f"⚠️  RECKLESS REBOOT: No investigation performed on {machine.hostname}. "
+                    f"Blind reboot penalty applied. Investigation progress lost."
+                )
+            else:
+                self._destructive_penalties += 0.10  # Standard reboot penalty
+                self._last_command_output = (
+                    f"shutdown -r now\n"
+                    f"System rebooting... {machine.hostname} will be back in ~60s. "
+                    f"Downtime penalty applied."
+                )
+            # Reboot kills all anomalies but also restarts healthy services
             machine.processes = [p for p in machine.processes if not p.is_anomaly]
             for p in machine.processes:
                 p.cpu_pct = max(0.5, p.cpu_pct * 0.3)
                 p.mem_pct = max(0.5, p.mem_pct * 0.3)
             machine.mem_used = sum(p.mem_pct for p in machine.processes)
-            # Heavy penalty for brute-force reboot
-            self._destructive_penalties += 0.10
+            # Reset investigation progress on this machine
+            self._investigated_machines.discard(machine.id)
+            self._logs_read_machines.discard(machine.id)
 
         elif action.command == Command.CHECK_LOGS:
-            # Diagnostic action: doesn't fix anything, but triggers log_read milestone
-            # and enriches the syslog output for next observation
+            # Diagnostic action: triggers log_read milestone
+            self._logs_read_machines.add(machine.id)
             if machine.id in self._milestones:
                 self._milestones[machine.id]["log_read"] = True
-            # Generate extra-verbose syslog for this machine on next tick
+            # Generate rich syslog output as command_output
             machine.syslog_tail = self._generate_syslog(machine)
+            self._last_command_output = (
+                f"journalctl -u all --no-pager -n 50 | tail -n 20\n"
+                f"--- {machine.hostname} syslog ---\n"
+                f"{machine.syslog_tail}"
+            )
 
         elif action.command == Command.DRAIN_NODE:
-            # Isolate the machine from the dependency graph
             machine.drained = True
             if machine.id in self._milestones:
                 self._milestones[machine.id]["node_isolated"] = True
-            # Draining prevents cascade propagation from this node
-            print(f"NODE DRAINED: {machine.id} isolated from dependency graph")
+            self._last_command_output = (
+                f"kubectl cordon {machine.hostname}\n"
+                f"node/{machine.hostname} cordoned\n"
+                f"kubectl drain {machine.hostname} --ignore-daemonsets --delete-emptydir-data\n"
+                f"evicting pods from {machine.hostname}... done. Node isolated from dependency graph."
+            )
 
         elif action.command == Command.CLEAR_DISK:
-            # Clear disk space — specifically handles disk-full scenarios
+            # TRAP: Clearing disk without checking logs first — blind deletion
+            if machine.id not in self._logs_read_machines:
+                self._destructive_penalties += 0.25
+                self._last_command_output = (
+                    f"rm -rf /var/log/*\n"
+                    f"🚨 TRAP: Blind disk clear! You deleted critical logs without investigating first.\n"
+                    f"Forensic evidence lost. System marked unstable. Penalty applied (-0.25)."
+                )
+                # Machine status degrades because we lost diagnostic capability
+                if machine.status == MachineStatus.HEALTHY:
+                    machine.status = MachineStatus.DEGRADED
+            else:
+                self._last_command_output = (
+                    f"find /var/log -name '*.gz' -delete && truncate -s 0 /var/log/syslog\n"
+                    f"Freed disk space on {machine.hostname}. "
+                )
+
             if machine.disk_pct > 75.0:
                 machine.disk_pct = max(15.0, machine.disk_pct - 60.0)
-                # Also kill the disk-filling process if present
                 disk_procs = [p for p in machine.processes if p.is_anomaly and p.name in ("log_rotator", "disk_filler")]
                 for dp in disk_procs:
                     dp.state = ProcessState.DEAD
@@ -637,12 +747,33 @@ class FleetSimulator:
                         self._milestones[machine.id]["pid_identified"] = True
                 machine.processes = [p for p in machine.processes if p.state != ProcessState.DEAD]
                 machine.mem_used = sum(p.mem_pct for p in machine.processes)
-            else:
-                # Clearing disk on a non-full machine is wasteful but not destructive
-                pass
+                self._last_command_output += f"Disk usage: {machine.disk_pct:.0f}%."
 
         elif action.command == Command.NOOP:
-            pass
+            self._last_command_output = "Waiting... monitoring fleet status."
+
+        # ── Investigation Commands ──────────────────────────────────────
+
+        elif action.command == Command.RUN_TOP:
+            self._investigated_machines.add(machine.id)
+            if machine.id in self._milestones:
+                # Set investigated milestone (partial reward for investigation)
+                self._milestones[machine.id].setdefault("investigated", False)
+                self._milestones[machine.id]["investigated"] = True
+            self._last_command_output = self._simulate_top(machine)
+
+        elif action.command == Command.RUN_DF:
+            self._last_command_output = self._simulate_df(machine)
+
+        elif action.command == Command.RUN_FREE:
+            self._last_command_output = self._simulate_free(machine)
+
+        elif action.command == Command.DOCKER_STATS:
+            self._investigated_machines.add(machine.id)
+            self._last_command_output = self._simulate_docker_stats(machine)
+
+        elif action.command == Command.NETSTAT:
+            self._last_command_output = self._simulate_netstat(machine)
 
     # ── Dynamics ────────────────────────────────────────────────────────
 
@@ -738,9 +869,17 @@ class FleetSimulator:
 
         return round(max(0.0, min(1.0, reward)), 4)
 
-    # ── Observation Builder ─────────────────────────────────────────────
+    # ── Observation Builder (Partial Observability) ─────────────────────
 
-    def _make_observation(self) -> Observation:
+    def _make_partial_observation(self, is_reset: bool = False) -> Observation:
+        """Build an observation with PARTIAL visibility.
+        
+        The agent only sees:
+        - Machine IDs, hostnames, status, high-level metrics (always)
+        - Process list (only if agent ran run_top / docker_stats on this machine)
+        - Syslog (only if agent ran check_logs on this machine)
+        - is_anomaly is ALWAYS hidden (set to False)
+        """
         reward = self._calc_reward()
         info: Dict[str, Any] = {
             "milestones": deepcopy(self._milestones),
@@ -754,6 +893,68 @@ class FleetSimulator:
 
         deps = {m.id: m.dependencies for m in self._fleet if m.dependencies}
 
+        # Build partial fleet — hide details the agent hasn't investigated
+        partial_fleet = []
+        for m in self._fleet:
+            partial_m = Machine(
+                id=m.id,
+                hostname=m.hostname,
+                cpu_total=m.cpu_total,
+                mem_total=m.mem_total,
+                mem_used=m.mem_used,
+                disk_pct=m.disk_pct,
+                status=m.status,
+                dependencies=m.dependencies,
+                drained=m.drained,
+                processes=[],
+                syslog_tail="[Run check_logs to inspect system logs]",
+            )
+
+            # Reveal processes only if agent has investigated this machine
+            if m.id in self._investigated_machines:
+                partial_m.processes = [
+                    Process(
+                        pid=p.pid,
+                        name=p.name,
+                        cpu_pct=round(p.cpu_pct, 1),
+                        mem_pct=round(p.mem_pct, 1),
+                        state=p.state,
+                        is_anomaly=False,  # NEVER reveal — agent must infer
+                    )
+                    for p in m.processes
+                ]
+
+            # Reveal syslogs only if agent has read logs
+            if m.id in self._logs_read_machines:
+                partial_m.syslog_tail = m.syslog_tail
+
+            partial_fleet.append(partial_m)
+
+        alert = TASK_ALERTS.get(self._task_name, "") if is_reset else ""
+
+        return Observation(
+            fleet=partial_fleet,
+            dependencies=deps,
+            step_count=self._step_count,
+            done=self._done,
+            reward=reward,
+            info=info,
+            alert=alert,
+            command_output=self._last_command_output,
+        )
+
+    def _make_observation(self) -> Observation:
+        """Full observability (used internally for grading/episode recording only)."""
+        reward = self._calc_reward()
+        info: Dict[str, Any] = {
+            "milestones": deepcopy(self._milestones),
+        }
+        if self._done:
+            healthy = sum(1 for m in self._fleet if m.status == MachineStatus.HEALTHY)
+            info["healthy_count"] = healthy
+            info["total_count"] = len(self._fleet)
+            info["success"] = all(m.status == MachineStatus.HEALTHY for m in self._fleet)
+        deps = {m.id: m.dependencies for m in self._fleet if m.dependencies}
         return Observation(
             fleet=deepcopy(self._fleet),
             dependencies=deps,
@@ -762,6 +963,94 @@ class FleetSimulator:
             reward=reward,
             info=info,
         )
+
+    # ── Simulated Terminal Output Generators ────────────────────────────
+
+    def _simulate_top(self, machine: Machine) -> str:
+        """Simulate `top` command output for a machine."""
+        lines = [
+            f"top - 03:{random.randint(10,59)}:{random.randint(10,59)} up 47 days, 3:21, 2 users, load average: "
+            f"{sum(p.cpu_pct for p in machine.processes)/100:.2f}, "
+            f"{sum(p.cpu_pct for p in machine.processes)/120:.2f}, "
+            f"{sum(p.cpu_pct for p in machine.processes)/150:.2f}",
+            f"Tasks: {len(machine.processes)} total, "
+            f"{sum(1 for p in machine.processes if p.state == ProcessState.RUNNING)} running, "
+            f"{sum(1 for p in machine.processes if p.state == ProcessState.ZOMBIE)} zombie",
+            f"%Cpu(s): {sum(p.cpu_pct for p in machine.processes):.1f} us, 2.3 sy, 0.0 ni, "
+            f"{max(0, 100 - sum(p.cpu_pct for p in machine.processes)):.1f} id",
+            f"MiB Mem:  16384.0 total, {max(0, 16384 - machine.mem_used * 163.84):.1f} free, "
+            f"{machine.mem_used * 163.84:.1f} used, 1024.0 buff/cache",
+            "",
+            f"{'PID':>7} {'USER':<8} {'PR':>3} {'NI':>3} {'VIRT':>8} {'RES':>8} {'%CPU':>6} {'%MEM':>6}  {'S':<2} {'COMMAND':<20}",
+        ]
+        # Sort by CPU descending — anomalies naturally float to top
+        sorted_procs = sorted(machine.processes, key=lambda p: p.cpu_pct, reverse=True)
+        for p in sorted_procs:
+            virt = f"{random.randint(100, 9999)}m" if p.cpu_pct < 50 else f"{random.uniform(1, 12):.1f}g"
+            res = f"{random.randint(10, 500)}m" if p.mem_pct < 30 else f"{random.uniform(1, 8):.1f}g"
+            state = "Z" if p.state == ProcessState.ZOMBIE else ("D" if p.cpu_pct > 80 else "S")
+            lines.append(
+                f"{p.pid:>7} {'root':<8} {20:>3} {0:>3} {virt:>8} {res:>8} {p.cpu_pct:>6.1f} {p.mem_pct:>6.1f}  {state:<2} {p.name:<20}"
+            )
+        return "\n".join(lines)
+
+    def _simulate_df(self, machine: Machine) -> str:
+        """Simulate `df -h` command output."""
+        total_gb = 100
+        used_gb = machine.disk_pct
+        avail_gb = total_gb - used_gb
+        return (
+            f"Filesystem      Size  Used Avail Use% Mounted on\n"
+            f"/dev/sda1       {total_gb}G   {used_gb:.0f}G   {avail_gb:.0f}G  {machine.disk_pct:.0f}%  /\n"
+            f"tmpfs           7.8G  1.2M  7.8G   1%  /dev/shm\n"
+            f"/dev/sdb1       500G  120G  380G  24%  /data\n"
+            f"/dev/sda2       {total_gb}G   {min(99, machine.disk_pct + random.uniform(0, 5)):.0f}G   "
+            f"{max(1, avail_gb - random.uniform(0, 5)):.0f}G  {min(99, machine.disk_pct + 3):.0f}%  /var/log"
+        )
+
+    def _simulate_free(self, machine: Machine) -> str:
+        """Simulate `free -m` command output."""
+        total = 16384
+        used = int(machine.mem_used * 163.84)
+        free = total - used
+        buffers = random.randint(256, 1024)
+        return (
+            f"              total        used        free      shared  buff/cache   available\n"
+            f"Mem:          {total}       {used}       {max(0, free - buffers)}         128       {buffers}       {max(0, free)}\n"
+            f"Swap:          4096        {random.randint(0, 512)}       {4096 - random.randint(0, 512)}"
+        )
+
+    def _simulate_docker_stats(self, machine: Machine) -> str:
+        """Simulate `docker stats --no-stream` output."""
+        lines = [f"{'CONTAINER ID':<14} {'NAME':<25} {'CPU %':>7} {'MEM USAGE':>15} {'MEM %':>7} {'NET I/O':>15}"]
+        for p in machine.processes:
+            cid = uuid.uuid4().hex[:12]
+            mem_mb = p.mem_pct * 163.84 / len(machine.processes) if machine.processes else 0
+            lines.append(
+                f"{cid:<14} {p.name:<25} {p.cpu_pct:>6.1f}% {mem_mb:>7.0f}MiB / 16GiB {p.mem_pct:>6.1f}% "
+                f"{random.uniform(1, 500):.0f}MB / {random.uniform(1, 200):.0f}MB"
+            )
+        return "\n".join(lines)
+
+    def _simulate_netstat(self, machine: Machine) -> str:
+        """Simulate `netstat -tlnp` output."""
+        lines = [
+            "Active Internet connections (only servers)",
+            f"{'Proto':<6} {'Recv-Q':>6} {'Send-Q':>6} {'Local Address':<24} {'Foreign Address':<24} {'State':<12} {'PID/Program name'}",
+        ]
+        port_map = {
+            "nginx": 80, "sshd": 22, "node_exporter": 9100,
+            "postgres: deadlocked_query": 5432, "redis": 6379,
+            "gunicorn": 8000, "haproxy": 443,
+        }
+        for p in machine.processes:
+            port = port_map.get(p.name, random.randint(3000, 9999))
+            state = "LISTEN" if p.state == ProcessState.RUNNING else "CLOSE_WAIT"
+            send_q = random.randint(0, 5) if p.cpu_pct < 50 else random.randint(100, 999)
+            lines.append(
+                f"{'tcp':<6} {0:>6} {send_q:>6} {'0.0.0.0:' + str(port):<24} {'0.0.0.0:*':<24} {state:<12} {p.pid}/{p.name}"
+            )
+        return "\n".join(lines)
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
