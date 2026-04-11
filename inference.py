@@ -17,10 +17,10 @@ import httpx
 # ── Config ──────────────────────────────────────────────────────────────────
 
 BASE_URL = os.environ.get("OPENENV_BASE_URL", "http://localhost:7860")
-# 🚨 Strictly using the exact variable names requested by the grader specs
+# Support both the hackathon's OPENAI_API_KEY contract and the repo's HF_TOKEN.
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN = os.environ.get("HF_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
 MAX_STEPS = 25
 
 # ── Suspicious process name patterns (heuristic anomaly detection) ───────────
@@ -280,81 +280,85 @@ Return ONLY valid JSON with these exact keys:
 
 TIMEOUT_SECONDS = 120.0
 
+def _print_end(success: bool, steps: int, score: float, rewards_log: list[float]) -> None:
+    """Emit the strict terminal line that the evaluator parses for task completion."""
+    success_str = str(success).lower()
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards_log) if rewards_log else "0.00"
+    print(f"[END] success={success_str} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+
+
 def run_task(task_name: str, client=None) -> dict:
-    with httpx.Client(base_url=BASE_URL, timeout=TIMEOUT_SECONDS) as http:
-        action_log = []
-        rewards_log = []
+    action_log = []
+    rewards_log = []
+    steps = 0
+    obs = {}
 
-        resp = http.post("/reset", json={"task_name": task_name})
-        resp.raise_for_status()
-        obs = resp.json()
+    # 🚨 STRICT GRADER FORMAT: [START]
+    print(f"[START] task={task_name} env=sre_fleet_gym model={MODEL_NAME}", flush=True)
 
-        # 🚨 STRICT GRADER FORMAT: [START]
-        print(f"[START] task={task_name} env=sre_fleet_gym model={MODEL_NAME}", flush=True)
-
-        # Create investigation agent for this episode
-        agent = InvestigationAgent(task_name)
-        
-        steps = 0
-        while not obs.get("done", False) and steps < MAX_STEPS:
-            try:
-                if client and HF_TOKEN:
-                    action = llm_action(obs, task_name, client)
-                else:
-                    action = heuristic_action(obs, task_name, step=steps, agent=agent)
-            except Exception:
-                action = heuristic_action(obs, task_name, step=steps, agent=agent)
-
-            # Dashboard logging
-            target_str = action.get('target', 'None')
-            command_str = action['command']
-            reasoning = action.get("reasoning", "Targeted anomalous process.")
-            action_log.append({
-                "machine": action["machine_id"],
-                "command": f"{command_str} on {target_str}",
-                "reasoning": reasoning
-            })
-
-            # Execute Step
-            resp = http.post("/step", json=action)
+    try:
+        with httpx.Client(base_url=BASE_URL, timeout=TIMEOUT_SECONDS) as http:
+            resp = http.post("/reset", json={"task_name": task_name})
             resp.raise_for_status()
             obs = resp.json()
-            steps += 1
-            
-            reward = obs.get("reward", 0.0)
-            done = obs.get("done", False)
-            rewards_log.append(reward)
 
-            # Show command output for debugging
-            cmd_out = obs.get("command_output", "")
-            if cmd_out:
-                # Truncate for log line
-                cmd_out_short = cmd_out[:100].replace("\n", " | ")
+            agent = InvestigationAgent(task_name)
 
-            # 🚨 STRICT GRADER FORMAT: [STEP]
-            action_str = json.dumps(action).replace(" ", "")
-            done_str = str(done).lower()
-            print(f"[STEP] step={steps} action={action_str} reward={reward:.2f} done={done_str} error=null", flush=True)
+            while not obs.get("done", False) and steps < MAX_STEPS:
+                try:
+                    if client is not None:
+                        action = llm_action(obs, task_name, client)
+                    else:
+                        action = heuristic_action(obs, task_name, step=steps, agent=agent)
+                except Exception:
+                    action = heuristic_action(obs, task_name, step=steps, agent=agent)
 
-        # Grade
-        resp = http.post("/grader")
-        resp.raise_for_status()
-        grader = resp.json()
+                target_str = action.get("target", "None")
+                command_str = action["command"]
+                reasoning = action.get("reasoning", "Targeted anomalous process.")
+                action_log.append({
+                    "machine": action["machine_id"],
+                    "command": f"{command_str} on {target_str}",
+                    "reasoning": reasoning,
+                })
 
-        score = grader.get("score", 0.0)
-        success_str = str(score > 0.0).lower()
-        rewards_str = ",".join(f"{r:.2f}" for r in rewards_log) if rewards_log else "0.00"
-        
-        # 🚨 STRICT GRADER FORMAT: [END]
-        print(f"[END] success={success_str} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+                resp = http.post("/step", json=action)
+                resp.raise_for_status()
+                obs = resp.json()
+                steps += 1
 
+                reward = obs.get("reward", 0.0)
+                done = obs.get("done", False)
+                rewards_log.append(reward)
+
+                action_str = json.dumps(action, separators=(",", ":"))
+                done_str = str(done).lower()
+                print(f"[STEP] step={steps} action={action_str} reward={reward:.2f} done={done_str} error=null", flush=True)
+
+            resp = http.post("/grader")
+            resp.raise_for_status()
+            grader = resp.json()
+    except Exception as exc:
+        _print_end(False, steps, 0.0, rewards_log)
         return {
             "task": task_name,
-            "score": score,
+            "score": 0.0,
             "steps": steps,
-            "feedback": grader.get("feedback", []),
-            "history": action_log
+            "feedback": [f"Runner error: {type(exc).__name__}: {exc}"],
+            "history": action_log,
         }
+
+    score = float(grader.get("score", 0.0))
+    success = bool(obs.get("info", {}).get("success", False))
+    _print_end(success, steps, score, rewards_log)
+
+    return {
+        "task": task_name,
+        "score": score,
+        "steps": steps,
+        "feedback": grader.get("feedback", []),
+        "history": action_log,
+    }
 
 
 # ── Run All Tasks ────────────────────────────────────────────────────────────
@@ -375,11 +379,7 @@ def run_all_tasks() -> dict:
     results = []
 
     for task in task_names:
-        try:
-            result = run_task(task, client)
-            results.append(result)
-        except Exception as e:
-            results.append({"task": task, "score": 0.0, "steps": 0})
+        results.append(run_task(task, client))
 
     total = sum(r["score"] for r in results)
 
@@ -389,74 +389,9 @@ def run_all_tasks() -> dict:
         "max": float(len(results)),
     }
 
-
-import time
-import sys
-
-def run_agent_loop(task_name, difficulty):
-    """
-    The core Reinforcement Learning loop for the baseline agent.
-    """
-    print(f"\n[SYSTEM] Initializing Environment: {task_name} ({difficulty})")
-    print(f"[SYSTEM] Request Timeout locked at {TIMEOUT_SECONDS}s.")
-    time.sleep(1)
-
-    print(f"\n[ALERT] {difficulty} Incident Detected. Handing over to AI Agent...\n")
-
-    client = None
-    if HF_TOKEN:
-        try:
-            from openai import OpenAI
-            client = OpenAI(
-                api_key=HF_TOKEN,
-                base_url=API_BASE_URL
-            )
-        except Exception:
-            client = None
-
-    result = run_task(task_name, client)
-    print(f"\n[✔] Mission Concluded. Final Score: {result.get('score', 0.0)}")
-
-
 def main():
-    """
-    Interactive Mission Control Menu
-    """
-    os.system('clear' if os.name == 'posix' else 'cls')
-    print("==================================================")
-    print("     SRE FLEET GYM - MISSION CONTROL TERMINAL     ")
-    print("==================================================")
-    print("Select an incident to dispatch the Baseline Agent:\n")
-    print("  [1] Single Machine Failure  (Difficulty: Easy)")
-    print("      Description: Clear a 99% full disk on a worker node.")
-    print("  [2] Multi-Machine Anomaly   (Difficulty: Medium)")
-    print("      Description: Track down a memory leak across 3 web servers.")
-    print("  [3] Cascade Failure         (Difficulty: Hard)")
-    print("      Description: Global database deadlock crashing the entire fleet.")
-    print("  [0] Exit Simulator")
-    print("==================================================")
-
-    while True:
-        try:
-            choice = input("\nCommander, select scenario (1/2/3/0): ").strip()
-            
-            if choice == '1':
-                run_agent_loop(task_name="single_machine", difficulty="Easy")
-                break
-            elif choice == '2':
-                run_agent_loop(task_name="multi_machine", difficulty="Medium")
-                break
-            elif choice == '3':
-                run_agent_loop(task_name="cascade_failure", difficulty="Hard")
-                break
-            elif choice == '0':
-                print("[SYSTEM] Shutting down simulator...")
-                sys.exit(0)
-            else:
-                print("[ERROR] Invalid input. Please select 1, 2, 3, or 0.")
-        except KeyboardInterrupt:
-            print("\n[SYSTEM] Emergency abort triggered. Exiting.")
-            sys.exit(0)
+    """Run the full baseline suite with strict structured stdout only."""
+    run_all_tasks()
 
 
 if __name__ == "__main__":

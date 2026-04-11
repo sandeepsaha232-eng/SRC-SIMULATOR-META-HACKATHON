@@ -397,6 +397,7 @@ class FleetSimulator:
             has_anomaly = any(p.is_anomaly for p in m.processes)
             if has_anomaly or m.status != MachineStatus.HEALTHY:
                 self._milestones[m.id] = {
+                    "investigated": False,   # Agent discovered process state via run_top/docker_stats
                     "log_read": False,       # Agent inspected logs on this machine
                     "pid_identified": False,  # Agent targeted the correct anomaly PID
                     "node_isolated": False,   # Agent drained/isolated this node (cascade)
@@ -757,8 +758,6 @@ class FleetSimulator:
         elif action.command == Command.RUN_TOP:
             self._investigated_machines.add(machine.id)
             if machine.id in self._milestones:
-                # Set investigated milestone (partial reward for investigation)
-                self._milestones[machine.id].setdefault("investigated", False)
                 self._milestones[machine.id]["investigated"] = True
             self._last_command_output = self._simulate_top(machine)
 
@@ -770,6 +769,8 @@ class FleetSimulator:
 
         elif action.command == Command.DOCKER_STATS:
             self._investigated_machines.add(machine.id)
+            if machine.id in self._milestones:
+                self._milestones[machine.id]["investigated"] = True
             self._last_command_output = self._simulate_docker_stats(machine)
 
         elif action.command == Command.NETSTAT:

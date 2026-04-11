@@ -6,6 +6,10 @@ colorTo: blue
 sdk: docker
 app_file: app.py
 pinned: false
+tags:
+  - openenv
+  - docker
+  - rl-environment
 ---
 <p align="center">
   <img src="https://raw.githubusercontent.com/sandeepsaha232-eng/SRC-SIMULATOR-META-HACKATHON/main/assets/hero.png" alt="SRE Fleet Gym Cyberpunk Dashboard" width="100%">
@@ -70,8 +74,9 @@ If an agent blindly restarts a broken cache layer before manually fixing the und
 Unlike clean gym environments, SRE Fleet Gym requires agents to parse **both** structured metrics and **raw, noisy Linux syslog output** — just like a real SRE reading `journalctl` at 3 AM:
 
 ### Structured Telemetry
+- **Alert + command output**: an initial incident alert plus terminal-style output from the last command
 - **CPU/Memory/Disk metrics** per machine (floats)
-- **Process table** with PID, name, state (`running`/`zombie`/`dead`), and `is_anomaly` flag
+- **Process table** is hidden until `run_top`/`docker_stats`; returned processes always have `is_anomaly=false`
 - **Dependency graph** mapping upstream/downstream machine relationships
 
 ### Raw Syslog Output (`syslog_tail`)
@@ -95,10 +100,15 @@ All actions map to **real Linux terminal commands**, not abstract buttons:
 
 | Command | Linux Equivalent | Description |
 |---------|-----------------|-------------|
+| `run_top` | `top` | Primary investigation command; reveals running processes on the target machine |
+| `run_df` | `df -h` | Reads disk usage without taking action |
+| `run_free` | `free -m` | Reads memory pressure without taking action |
+| `docker_stats` | `docker stats --no-stream` | Investigates container/resource pressure and reveals process-like workload context |
+| `netstat` | `netstat -tlnp` | Reads listening ports and connection state |
+| `check_logs` | `journalctl -u <svc> -n 50` | Diagnostic: reveals raw syslog output and triggers `log_read` |
 | `kill_pid` | `kill -9 <PID>` | Surgically terminate a specific process by PID |
 | `restart_service` | `systemctl restart <service>` | Restart a named service (⚠️ can trigger cache stampede) |
 | `reboot` | `shutdown -r now` | Nuclear option — clears all faults but incurs `-0.10` downtime penalty |
-| `check_logs` | `journalctl -u <svc> -n 50` | Diagnostic: enriches syslog output, triggers `log_read` milestone |
 | `drain_node` | `kubectl cordon <node>` | Isolate machine from dependency graph, prevents cascade propagation |
 | `clear_disk` | `find /var/log -name '*.gz' -delete` | Clear disk space, kill disk-filling processes |
 | `noop` | *(wait)* | Observe and do nothing |
@@ -112,6 +122,7 @@ We don't use a sparse binary `0/1` reward. Instead, SRE Fleet Gym uses a **miles
 ### Milestones (✅ Partial credit at every step)
 | Milestone | Weight | Trigger |
 |-----------|--------|---------|
+| `investigated` | +0.05 | Agent ran `run_top` or `docker_stats` on a broken machine |
 | `log_read` | +0.10 | Agent inspected the machine's syslog (via `check_logs` or targeting the machine) |
 | `pid_identified` | +0.25 | Agent issued `kill_pid` with the correct anomaly PID |
 | `node_isolated` | +0.15 | Agent used `drain_node` to prevent cascade propagation |
@@ -126,32 +137,30 @@ We don't use a sparse binary `0/1` reward. Instead, SRE Fleet Gym uses a **miles
 | SLO burn rate | -0.01 to -0.04/step | Broken infrastructure incurs tier-weighted penalties (DB > cache > app > edge) |
 | Step penalty | -0.005/step | Encourages efficiency |
 
-### Example Reward Curve (cascade_failure task)
+### Example Reward Curve (current deterministic heuristic on `cascade_failure`)
 ```
-Step  1: 0.13  ← killed deadlocked query on db-01
-Step  2: 0.21  ← killed CPU hog on cache-02
-Step  3: 0.27  ← killed zombie on app-02
-Step  4: 0.35  ← killed fork bomb on app-05
-Step  5: 0.44  ← killed crypto miner on app-06
-Step  6: 0.52  ← killed runaway loop on app-08
-Step  7: 0.59  ← cleared disk on edge-01
-Step  8+: 0.55–0.51 (step penalty decays while fleet self-heals)
+Step  1: 0.03  ← investigated db-01 with `run_top`
+Step  3: 0.09  ← killed deadlocked query on db-01
+Step  6: 0.18  ← killed CPU hog on cache-02
+Step 12: 0.25  ← killed fork bomb on app-05
+Step 21: 0.40  ← cleared disk on edge-01
+Step 25: 0.38  ← remaining unhealthy nodes keep the final live reward below the graded score
 ```
 
 ---
 
 ## 📊 Baseline Proof: Verified Scores
 
-The following scores were achieved by our deterministic heuristic agent (`inference.py`) running against the local environment:
+The following scores were verified by the deterministic investigation-first heuristic in [`inference.py`](./inference.py) against the live Hugging Face Space:
 
 | Task | Score | Steps | Strategy |
 |------|-------|-------|----------|
-| `single_machine` | **0.96** | 2 | `check_logs` → `kill_pid 999` (log_rotator) |
-| `multi_machine` | **0.95** | 5 | Sequential `kill_pid` on all 5 anomaly PIDs |
-| `cascade_failure` | **0.79** | 7 active + 18 noop | Fix in tier order: db → cache → app → edge |
-| **Total** | **2.70 / 3.0** | | |
+| `single_machine` | **0.95** | 3 | `run_top` → `check_logs` → `clear_disk` |
+| `multi_machine` | **0.85** | 15 | Per machine: `run_top` → `check_logs` → `kill_pid` |
+| `cascade_failure` | **0.6936** | 25 | Investigation-first, tier-ordered remediation: db → cache → app → edge |
+| **Total** | **2.4936 / 3.0** | | |
 
-> The environment is **solvable but challenging**. A perfect agent could achieve ~2.97/3.0 by combining `check_logs` for milestones, `drain_node` for cascade prevention, and optimal fixing order — leaving room for RL/LLM agents to improve.
+> The baseline is intentionally conservative: it investigates before every fix, earns shaped reward along the way, and leaves headroom for stronger agents to improve cascade resolution and node isolation strategy.
 
 ---
 
@@ -177,12 +186,14 @@ uvicorn app:app --port 7860 --reload
 # In a new terminal, run the agent (Heuristic/Deterministic)
 python inference.py
 
-# OR: Run with LLM Intelligence (Requires API Key)
-export HF_TOKEN="your_key"
+# OR: Run with LLM Intelligence (uses the OpenAI client with any OpenAI-compatible endpoint)
+export OPENAI_API_KEY="your_key"  # `HF_TOKEN` is also accepted for compatibility
 export API_BASE_URL="https://api.groq.com/openai/v1"
 export MODEL_NAME="llama3-70b-8192"
 python inference.py
 ```
+
+When run from the repo root, `python inference.py` emits only strict `[START]`, `[STEP]`, and `[END]` lines for the evaluator.
 
 ### 3. API Quick Test
 ```bash

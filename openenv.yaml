@@ -196,10 +196,10 @@ baseline:
   api_client: openai
   fallback: heuristic
   scores:
-    single_machine:  0.96
+    single_machine:  0.95
     multi_machine:   0.85
-    cascade_failure: 0.69
-    total: 2.50
+    cascade_failure: 0.6936
+    total: 2.4936
     max:   3.0
 
 docker:

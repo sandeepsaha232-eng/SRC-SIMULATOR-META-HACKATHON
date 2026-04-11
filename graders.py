@@ -1,8 +1,8 @@
 """
 graders.py — Task graders for the SRE Fleet Gym.
 
-Each grader receives an EpisodeRecord and returns a float score in (0.0, 1.0).
-Scores are clamped to [0.01, 0.99] to satisfy the OpenEnv validator.
+Each grader receives an EpisodeRecord and returns a float score in [0.0, 1.0].
+Scores are clamped to [0.0, 1.0] to match the OpenEnv task contract.
 
 Milestone-based scoring with partial progress signals:
   - investigated:     Agent ran run_top to discover processes      (+0.05)
@@ -33,6 +33,11 @@ MILESTONE_WEIGHTS = {
     "node_isolated": 0.15,
     "service_restored": 0.25,
 }
+
+
+def _clamp_score(value: float) -> float:
+    """Clamp a score to the inclusive OpenEnv range and round consistently."""
+    return round(max(0.0, min(1.0, value)), 4)
 
 
 def _calc_milestone_score(milestones: Dict[str, Dict[str, bool]], relevant_keys: list | None = None) -> tuple[float, list[str]]:
@@ -77,12 +82,12 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
     - Step bonus: +0.10 for ≤ 5 steps (adjusted for investigation overhead)
     - Step penalty: -0.05 per extra step beyond 8
     """
-    score = 0.01
+    score = 0.0
     feedback = []
 
     initial_machine = episode.initial_fleet[0] if episode.initial_fleet else None
     if not initial_machine:
-        return {"score": 0.01, "feedback": ["No initial fleet found."]}
+        return {"score": 0.0, "feedback": ["No initial fleet found."]}
 
     # Find the anomaly PID
     anomaly_pids = [p.pid for p in initial_machine.processes if p.is_anomaly]
@@ -146,15 +151,14 @@ def grade_single_machine(episode: EpisodeRecord) -> Dict:
     # ── Step bonus/penalty (adjusted for multi-turn investigation) ───
     steps = episode.total_steps
     if steps <= 5 and score > 0.20:
-        score = min(0.99, score + 0.10)
+        score = min(1.0, score + 0.10)
         feedback.append(f"🏆 Efficient: solved in {steps} steps (+0.10)")
     elif steps > 8:
         penalty = 0.05 * (steps - 8)
-        score = max(0.01, score - penalty)
+        score = max(0.0, score - penalty)
         feedback.append(f"⏱️ Took {steps} steps (penalty: -{penalty:.2f})")
 
-    score = max(0.01, min(0.99, score))
-    return {"score": round(score, 4), "max_score": 1.0, "feedback": feedback}
+    return {"score": _clamp_score(score), "max_score": 1.0, "feedback": feedback}
 
 
 def grade_multi_machine(episode: EpisodeRecord) -> Dict:
@@ -170,7 +174,7 @@ def grade_multi_machine(episode: EpisodeRecord) -> Dict:
     feedback = []
 
     if not episode.final_fleet:
-        return {"score": 0.01, "feedback": ["No final fleet state"]}
+        return {"score": 0.0, "feedback": ["No final fleet state"]}
 
     total = len(episode.final_fleet)
     healthy = sum(1 for m in episode.final_fleet if m.status == MachineStatus.HEALTHY)
@@ -205,16 +209,15 @@ def grade_multi_machine(episode: EpisodeRecord) -> Dict:
 
     if wrong_kills > 0:
         penalty = 0.10 * wrong_kills
-        base_score = max(0.01, base_score - penalty)
+        base_score = max(0.0, base_score - penalty)
         feedback.append(f"⚠️ {wrong_kills} non-anomaly process(es) killed (penalty: -{penalty:.2f})")
 
     # ── Efficiency bonus ─────────────────────────────────────────────
     if episode.total_steps <= 10 and base_score >= 0.5:
-        base_score = min(0.99, base_score + 0.10)
+        base_score = min(1.0, base_score + 0.10)
         feedback.append("🏆 Efficient resolution (+0.10)")
 
-    base_score = max(0.01, min(0.99, base_score))
-    return {"score": round(base_score, 4), "max_score": 1.0, "feedback": feedback}
+    return {"score": _clamp_score(base_score), "max_score": 1.0, "feedback": feedback}
 
 
 def grade_cascade_failure(episode: EpisodeRecord) -> Dict:
@@ -231,7 +234,7 @@ def grade_cascade_failure(episode: EpisodeRecord) -> Dict:
     feedback = []
 
     if not episode.final_fleet:
-        return {"score": 0.01, "feedback": ["No final fleet state"]}
+        return {"score": 0.0, "feedback": ["No final fleet state"]}
 
     total = len(episode.final_fleet)
     healthy = sum(1 for m in episode.final_fleet if m.status == MachineStatus.HEALTHY)
@@ -293,9 +296,8 @@ def grade_cascade_failure(episode: EpisodeRecord) -> Dict:
         feedback.append(f"⚠️ {wrong_kills} wrong kill(s) (penalty: -{wrong_kill_penalty:.2f})")
 
     final_score = milestone_component + order_bonus + speed_bonus + health_component - wrong_kill_penalty
-    final_score = max(0.01, min(0.99, final_score))
 
-    return {"score": round(final_score, 4), "max_score": 1.0, "feedback": feedback}
+    return {"score": _clamp_score(final_score), "max_score": 1.0, "feedback": feedback}
 
 
 # ── Grader dispatcher ──────────────────────────────────────────────────────
@@ -311,7 +313,7 @@ def grade_episode(episode: EpisodeRecord) -> Dict:
     """Grade an episode using the appropriate task grader."""
     grader_fn = GRADERS.get(episode.task_name)
     if not grader_fn:
-        return {"score": 0.01, "feedback": [f"No grader for task: {episode.task_name}"]}
+        return {"score": 0.0, "feedback": [f"No grader for task: {episode.task_name}"]}
     result = grader_fn(episode)
     result["task_name"] = episode.task_name
     result["total_steps"] = episode.total_steps
